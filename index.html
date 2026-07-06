@@ -424,6 +424,24 @@ body .text-2xl,body .text-3xl,body .text-4xl{font-family:var(--font-display);}
 .btn-orange-sm{background:var(--amber-bg);color:var(--amber);}.btn-orange-sm:hover{filter:brightness(.95);}
 .btn-gray-sm{background:var(--paper);color:var(--muted);border:1px solid var(--line);}.btn-gray-sm:hover{background:var(--line);}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-card,10px);box-shadow:var(--shadow-card);}
+/* Scroll-shadow hint for wide tables on narrow screens — many report/list
+   tables have more columns than fit on tablet/mobile and rely on horizontal
+   scroll (by design, so no data is ever cropped). Without a visual cue this
+   reads as "the table just ends here" rather than "swipe for more columns".
+   Pure CSS: the side gradients only render where content actually still
+   scrolls in that direction, and scroll with the content via
+   background-attachment:local so they disappear once you reach the edge. */
+.overflow-x-auto{
+  background:
+    linear-gradient(to right,var(--card) 30%,rgba(255,255,255,0)) left,
+    linear-gradient(to right,rgba(255,255,255,0),var(--card) 70%) right,
+    radial-gradient(farthest-side at 0 50%,rgba(0,0,0,.15),rgba(0,0,0,0)) left,
+    radial-gradient(farthest-side at 100% 50%,rgba(0,0,0,.15),rgba(0,0,0,0)) right;
+  background-repeat:no-repeat;
+  background-color:var(--card);
+  background-size:24px 100%,24px 100%,10px 100%,10px 100%;
+  background-attachment:local,local,scroll,scroll;
+}
 .shortage{color:var(--red);font-weight:600;}
 .excess{color:var(--green);font-weight:600;}
 .toast{animation:tIn .3s ease;}
@@ -488,7 +506,20 @@ body.auth-locked{overflow:hidden;height:100vh;}
   thead{display:table-header-group;}
   tr{page-break-inside:avoid;page-break-after:auto;}
   .card{border:1px solid #ccc;}
+  /* Faded logo watermark, centered behind every printed report/receipt
+     that goes through window.print() on the main document. Populated by
+     renderPrintWatermark() from Settings > Station's logo upload. Uses a
+     real <img> (not a CSS background-image) so it always prints regardless
+     of whether the browser's print dialog has "background graphics" on —
+     that toggle only suppresses CSS backgrounds, not actual image content. */
+  #print-watermark{
+    display:flex!important;align-items:center;justify-content:center;
+    position:fixed;top:0;left:0;width:100%;height:100%;
+    z-index:9999;pointer-events:none;
+  }
+  #print-watermark img{width:45%;max-width:320px;height:auto;opacity:.08;}
 }
+#print-watermark{display:none;}
 </style>
 <script id="xlsx-vendored">/* SheetJS (xlsx) — vendored, no CDN, works fully offline */
 /*! xlsx.js (C) 2013-present SheetJS -- http://sheetjs.com */
@@ -517,6 +548,10 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
 </script>
 </head>
 <body class="bg-slate-50 auth-locked">
+<!-- Print-only watermark — hidden on screen (see #print-watermark CSS rule),
+     shown faded behind every window.print() report/receipt once a company
+     logo is set in Settings > Station. Populated by renderPrintWatermark(). -->
+<div id="print-watermark"></div>
 <!-- ══════════════════════════════════════════
      AUTH OVERLAY (Login / Signup / Forgot)
 ════════════════════════════════════════════ -->
@@ -556,7 +591,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
   <!-- Station header -->
   <div class="px-4 pt-4 pb-0 flex-shrink-0">
     <div class="flex items-center gap-3 mb-3">
-      <div class="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0" style="background:var(--gold);">
+      <div id="sb-avatar-wrap" class="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0" style="background:var(--gold);">
         <span id="sb-avatar" class="text-white font-bold text-sm">VP</span>
       </div>
       <div class="min-w-0">
@@ -872,6 +907,20 @@ const DB={
     const out=[];
     for(const k of DB._cache.keys()){if(k.startsWith(prefix))out.push(k);}
     return out;
+  },
+
+  // Soft-delete-aware reads. Deleting a record now marks it {deleted:true,
+  // deletedAt,deletedBy} instead of removing it from IndexedDB — the raw
+  // record and its full history survive for audit review, but every normal
+  // list/lookup in the app must route through these two helpers instead of
+  // DB.listKeys/DB.get directly, or a "deleted" record would silently keep
+  // showing up in totals and reports.
+  listActive(prefix){
+    return DB.listKeys(prefix).map(k=>DB.get(k)).filter(r=>r&&!r.deleted);
+  },
+  getActive(k){
+    const r=DB.get(k);
+    return(r&&!r.deleted)?r:null;
   },
 
   set(k,v){
@@ -1296,28 +1345,44 @@ async function getSalesForMonth(year,month){
   const result={};
   for(let d=1;d<=days;d++){
     const ds=`${monthStr}-${String(d).padStart(2,'0')}`;
-    result[ds]={date:ds,byProduct:{},totalAmt:0,cashAmt:0,cardAmt:0,upiAmt:0,creditAmt:0,depositAmt:0};
+    result[ds]={date:ds,byProduct:{},totalAmt:0,cashAmt:0,cardAmt:0,upiAmt:0,creditAmt:0,depositAmt:0,pendingCount:0,pendingAmt:0};
   }
-  // Use IndexedDB range query on byDate index — no full table scan
   const start=`${monthStr}-01`;
   const lastDay=new Date(year,month,0).getDate();
   const end=`${monthStr}-${String(lastDay).padStart(2,'0')}`;
-  const rows=await dbRangeQuery('sessions','checkInDate',start,end);
-  // Single pass aggregation
-  for(const row of rows){
-    const s=row.data||row;
-    if(s.status!=='Settled')continue;
+
+  // ── FUEL DISPENSED — by check-in/handover date, every status. Litres and
+  // gross fuel ₹ are real the moment a shift is checked in; they don't wait
+  // on settlement, so this must never be gated on status==='Settled' (the
+  // Daily Report had exactly this bug — fixed there, now fixed here too).
+  const dispensedRows=await dbRangeQuery('sessions','checkInDate',start,end);
+  for(const row of dispensedRows){
+    const s=row;
     if(!s.checkInDate||!s.checkInDate.startsWith(monthStr))continue;
     const slot=result[s.checkInDate];if(!slot)continue;
-    slot.totalAmt +=s.calcSales||0;
-    slot.cashAmt  +=s.collections?.cashAmt  ||0;
-    slot.cardAmt  +=s.collections?.cardAmt  ||0;
-    slot.upiAmt   +=s.collections?.upiAmt   ||0;
-    slot.creditAmt+=s.collections?.creditAmt||0;
-    slot.depositAmt+=s.depositAmt||0;
+    slot.totalAmt+=s.calcSales||0;
     (s.assignedNozzles||[]).forEach(n=>{
       slot.byProduct[n.product]=(slot.byProduct[n.product]||0)+(n.netSale||0);
     });
+    if(s.status!=='Settled'){slot.pendingCount++;slot.pendingAmt+=s.calcSales||0;}
+  }
+
+  // ── CASH COLLECTED & SETTLED — by settlement date, not check-in date.
+  // Queried via the status index rather than the checkInDate range, since
+  // a shift settled in this month may have checked in a different month
+  // (or vice versa) — it must be counted on the day the cash was actually
+  // reconciled, matching the Daily Report's settlement-date logic exactly.
+  const settledRows=await dbFindByIndex('sessions','status','Settled');
+  for(const row of settledRows){
+    const s=row;
+    const settleDate=s.settledDate||s.checkOutDate||s.checkInDate;
+    if(!settleDate||!settleDate.startsWith(monthStr))continue;
+    const slot=result[settleDate];if(!slot)continue;
+    slot.cashAmt+=s.collections?.cashAmt||0;
+    slot.upiAmt+=s.collections?.upiAmt||0;
+    slot.cardAmt+=s.collections?.cardAmt||0;
+    slot.creditAmt+=s.collections?.creditAmt||0;
+    slot.depositAmt+=s.depositAmt||0;
   }
   return Object.values(result);
 }
@@ -1345,8 +1410,8 @@ async function getSalesForDate(dateStr){
 async function getBookStock(productId,dipDate){
   const opening=DB.get(`pbms_opening_stock_${productId}`);if(!opening)return null;
   let stock=opening.openingStock||0;
-  const purKeys=DB.listKeys('pbms_purchase_');
-  for(const k of purKeys){const p=DB.get(k);if(p&&p.product===productId&&p.date<=dipDate)stock+=p.quantity||0;}
+  const purKeys=DB.listActive('pbms_purchase_');
+  for(const p of purKeys){if(p&&p.product===productId&&p.date<=dipDate)stock+=p.quantity||0;}
   let cur=opening.asOfDate;let safe=0;
   while(cur<=dipDate&&safe<3650){
     const s=await getSalesForDate(cur);stock-=(s.byProduct[productId]||0);
@@ -1401,10 +1466,10 @@ async function getCreditOutstanding(){
 
 async function getLoanOutstanding(){
   let total=0;
-  const lKeys=DB.listKeys('pbms_loan_');
-  for(const k of lKeys){const l=DB.get(k);if(l)total+=l.principalAmount||0;}
-  const rKeys=DB.listKeys('pbms_loan_repayment_');
-  for(const k of rKeys){const r=DB.get(k);if(r)total-=r.amount||0;}
+  const lKeys=DB.listActive('pbms_loan_');
+  for(const l of lKeys){if(l)total+=l.principalAmount||0;}
+  const rKeys=DB.listActive('pbms_loan_repayment_');
+  for(const r of rKeys){if(r)total-=r.amount||0;}
   return Math.max(0,total);
 }
 
@@ -1770,7 +1835,7 @@ async function renderShift(el){
   const pinWarning=!(settings.managerPINHash||settings.managerPIN)?`<div class="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800 flex items-start gap-2 no-print">
     <svg class="w-4 h-4 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
     <span><strong>Manager PIN not set.</strong> Admin actions (rate changes, data clear, session edits) are currently unprotected.
-    <button onclick="navigate('settings');switchSettingsTab('station')" class="underline ml-1 hover:text-amber-900">Set PIN in Settings →</button></span>
+    <button onclick="navigate('settings');switchSettingsTab('station')" class="underline ml-1 hover:text-amber-900 inline-block py-2 -my-2">Set PIN in Settings →</button></span>
   </div>`:'';
   el.innerHTML=`${pageHeader('Shift Management',`${settings.stationName||'Station'} · ${fmt.date(today)}`)}
   ${pinWarning}
@@ -2299,6 +2364,9 @@ async function doCheckIn(){
     checkOutDate:null,checkOutTime:null,settledDate:null,settledTime:null,status:'Active',assignedNozzles:nozzles,
     collections:{cashAmt:0,cardAmt:0,upiAmt:0,creditAmt:0,oilAmt:0,discountAmt:0},calcSales:0,shortageExcess:0};
   DB.set(`pbms_session_${sessId}`,session);
+  await Audit.log('session_checkin','session',sessId,{employeeId:empId,employeeName:empName,
+    nozzles:nozzles.map(n=>({nozzleId:n.nozzleId,nozzleName:n.nozzleName,openingReading:n.openingReading})),
+    checkInDate:today,checkInTime:timeStr});
   toast(`${empName} checked in`,'success');
   closeModal();await navigate('shift');
 }
@@ -2347,6 +2415,9 @@ async function doHandover(sessId,date,time){
   }
   sess.status='HandedOver';sess.checkOutDate=date;sess.checkOutTime=time;
   DB.set(`pbms_session_${sessId}`,sess);
+  await Audit.log('session_handover','session',sessId,{employeeId:sess.employeeId,employeeName:sess.employeeName,
+    checkOutDate:date,checkOutTime:time,calcSales:sess.calcSales||0,
+    nozzles:(sess.assignedNozzles||[]).map(n=>({nozzleId:n.nozzleId,closingReading:n.closingReading,testLitres:n.testLitres,netSale:n.netSale,amount:n.amount}))});
   toast(`${sess.employeeName} handed over — nozzle is free. Settle cash when ready.`,'success');
   closeModal();await navigate('shift');
 }
@@ -2396,6 +2467,13 @@ async function doSettleCash(sessId,date,time){
   if(sess.status!=='HandedOver'){toast('This session is not awaiting settlement','error');closeModal();return;}
   sess.status='Settled';sess.settledDate=date;sess.settledTime=time;
   DB.set(`pbms_session_${sessId}`,sess);
+  // Cash settlement is the highest-value audit event in the shift lifecycle
+  // — it's the actual money count. Log every collection figure and the
+  // shortage/excess so the hash chain can prove these amounts were never
+  // altered after the fact.
+  await Audit.log('session_settled','session',sessId,{employeeId:sess.employeeId,employeeName:sess.employeeName,
+    settledDate:date,settledTime:time,calcSales:sess.calcSales||0,shortageExcess:sess.shortageExcess||0,
+    collections:{...(sess.collections||{})}});
   // Invalidate report cache so monthly/profit reports re-compute — figures
   // only appear in reports once fully Settled (Cash Book, Stock Ledger, P&L, etc.)
   await ReportCache.markDirty(['monthly','profit']);
@@ -3110,6 +3188,12 @@ async function saveSessionEdit(sessId,origin='staffreport'){
   sess.editHistory.push({editedAt:new Date().toISOString(),editedBy:APP.userEmail||'Manager',reason,before,after});
 
   DB.set(`pbms_session_${sessId}`,sess);
+  // editHistory above is a plain field on the session record — convenient
+  // for inline display, but not tamper-evident on its own (anyone with
+  // direct IndexedDB access could rewrite it with no trace). This entry
+  // in the hash-chained Audit log is the actual tamper-evident record of
+  // the edit — same before/after snapshot, but provably unaltered.
+  await Audit.log('session_edited','session',sessId,{employeeId:sess.employeeId,employeeName:sess.employeeName,reason,before,after});
   // Invalidate report cache so monthly report reflects the edit
   await ReportCache.markDirty(['monthly','profit']);
 
@@ -3215,8 +3299,7 @@ function getCurrentStockLevels(products){
       if(!latestDip[e.product]||d.date>latestDip[e.product].date)latestDip[e.product]={date:d.date,val:e.physicalStock};
     }
   }
-  const purKeys=DB.listKeys('pbms_purchase_');
-  const purchases=[];for(const k of purKeys){const p=DB.get(k);if(p&&p.date<=today)purchases.push(p);}
+  const purchases=DB.listActive('pbms_purchase_').filter(p=>p.date<=today);
   const sessKeys=DB.listKeys('pbms_session_');
   const sales=[];for(const k of sessKeys){const s=DB.get(k);if(s&&s.status==='Settled'&&s.checkInDate<=today)sales.push(s);}
 
@@ -3319,8 +3402,8 @@ async function loadSpTable(from,to,products){
   const extFrom=(()=>{const d=new Date(from);d.setMonth(d.getMonth()-3);return d.toISOString().split('T')[0];})();
   const cache={purchases:{},dips:{},sales:{},openings:{}};
   for(const p of products){const o=DB.get(`pbms_opening_stock_${p.id}`);if(o)cache.openings[p.id]=o;}
-  const purKeys=DB.listKeys('pbms_purchase_');
-  for(const k of purKeys){const p=DB.get(k);if(!p||p.date<extFrom||p.date>to)continue;
+  const purKeys=DB.listActive('pbms_purchase_');
+  for(const p of purKeys){if(!p||p.date<extFrom||p.date>to)continue;
     const key=`${p.date}_${p.product}`;cache.purchases[key]=(cache.purchases[key]||0)+(p.quantity||0);}
   const dipKeys=DB.listKeys('pbms_dip_');
   for(const k of dipKeys){const d=DB.get(k);if(!d||!d.date||d.date>to)continue;
@@ -3626,9 +3709,7 @@ function spUpdateFooter(rows,products){
 // OIL & LUBE TAB
 // ====================================================
 async function renderOilLubeTab(el){
-  const olKeys=DB.listKeys('pbms_oil_purchase_');
-  const purchases=[];
-  for(const k of olKeys){const p=DB.get(k);if(p)purchases.push(p);}
+  const purchases=DB.listActive('pbms_oil_purchase_');
   purchases.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   const sessKeys=DB.listKeys('pbms_session_');
   const dailySalesAll={};let totalSalesAmt=0;
@@ -3761,9 +3842,7 @@ function filterOilPurchases(){
 }
 
 async function refreshOilPurchaseHistory(){
-  const olKeys=DB.listKeys('pbms_oil_purchase_');
-  const purchases=[];
-  for(const k of olKeys){const p=DB.get(k);if(p)purchases.push(p);}
+  const purchases=DB.listActive('pbms_oil_purchase_');
   purchases.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   renderOilPurchaseHistoryTable(purchases);
 }
@@ -3814,8 +3893,7 @@ function toggleOilDl(){document.getElementById('ol-dl-menu')?.classList.toggle('
 
 async function downloadOilExcel(){
   if(typeof XLSX==='undefined'){toast('Excel library not loaded','error');return;}
-  const olKeys=DB.listKeys('pbms_oil_purchase_');
-  const purchases=[];for(const k of olKeys){const p=DB.get(k);if(p)purchases.push(p);}
+  const purchases=DB.listActive('pbms_oil_purchase_');
   const from=APP.tabs?.olFrom||'2000-01-01';const to=APP.tabs?.olTo||fmt.today();
   const filtered=purchases.filter(p=>p.date>=from&&p.date<=to).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   if(!filtered.length){toast('No data to export','warning');return;}
@@ -3897,7 +3975,7 @@ async function saveOilPurchase(){
   await renderOilLubeTab(document.getElementById('sp-tab-content'));
 }
 async function payOilPurchase(id){
-  const p=DB.get(`pbms_oil_purchase_${id}`);if(!p)return;
+  const p=DB.getActive(`pbms_oil_purchase_${id}`);if(!p)return;
   const due=Math.max(0,(p.totalCost||0)-(p.paidAmount||0));
   showModal(`<div class="p-6"><h2 class="text-lg font-bold text-slate-800 mb-4">Pay Oil Purchase</h2>
     <div class="bg-slate-50 rounded-lg p-3 mb-4 text-sm">
@@ -3918,17 +3996,21 @@ async function payOilPurchase(id){
 async function confirmOilPayment(id){
   const amount=parseFloat(document.getElementById('ol-pay-now')?.value)||0;
   if(amount<=0){toast('Enter amount','error');return;}
-  const p=DB.get(`pbms_oil_purchase_${id}`);if(!p)return;
+  const p=DB.getActive(`pbms_oil_purchase_${id}`);if(!p)return;
   const newPaid=(p.paidAmount||0)+amount;
   const newStatus=newPaid>=(p.totalCost||0)?'Paid':'Partial';
   const payments=[...(p.payments||(p.paidAmount>0?[{date:p.date,amount:p.paidAmount}]:[])),{date:fmt.today(),amount,mode:document.getElementById('ol-pay-mode')?.value||'Bank Transfer',createdAt:new Date().toISOString()}];
   DB.set(`pbms_oil_purchase_${id}`,{...p,paidAmount:newPaid,payments,payStatus:newStatus});
+  await Audit.log('oil_purchase_paid','oil_purchase',id,{amount,newPaid,newStatus});
   closeModal();toast('₹'+amount.toFixed(2)+' paid. '+(newStatus==='Paid'?'Fully settled!':'Partial payment recorded.'),'success');
   await renderOilLubeTab(document.getElementById('sp-tab-content'));
 }
 async function deleteOilPurchase(id){
   showConfirm('Delete Oil Purchase','Remove this oil/lube purchase record?',async()=>{
-    DB.del(`pbms_oil_purchase_${id}`);toast('Deleted','success');
+    const rec=DB.get(`pbms_oil_purchase_${id}`);
+    if(rec)DB.set(`pbms_oil_purchase_${id}`,{...rec,deleted:true,deletedAt:new Date().toISOString(),deletedBy:APP.userEmail||'Manager'});
+    await Audit.log('oil_purchase_deleted','oil_purchase',id,{supplier:rec?.supplier,totalCost:rec?.totalCost,paidAmount:rec?.paidAmount});
+    toast('Deleted','success');
     await renderOilLubeTab(document.getElementById('sp-tab-content'));
   });
 }
@@ -3946,8 +4028,7 @@ async function renderPurchasesTab(el){
   if(!APP.tabs.purTo)APP.tabs.purTo=today;
 
   // Load and filter purchases
-  const purKeys=DB.listKeys('pbms_purchase_');
-  const allPur=[];for(const k of purKeys){const p=DB.get(k);if(p)allPur.push(p);}
+  const allPur=DB.listActive('pbms_purchase_');
   const filtered=allPur.filter(p=>{
     if(APP.tabs.purProd!=='all'&&p.product!==APP.tabs.purProd)return false;
     if(APP.tabs.purStatus!=='all'&&p.paymentStatus!==APP.tabs.purStatus)return false;
@@ -4045,7 +4126,7 @@ async function showPurchaseModal(id){
   const settings=APP.settings||{};
   const products=(settings.products||[]).filter(p=>p.active);
   const tanks=(settings.tanks||[]).filter(t=>t.active);
-  const p=id?DB.get(`pbms_purchase_${id}`):null;
+  const p=id?DB.getActive(`pbms_purchase_${id}`):null;
   showModal(`<div class="p-6">
     <div class="flex items-center justify-between mb-5">
       <h2 class="text-lg font-bold text-slate-800">${id?'Edit':'Add'} Fuel Purchase</h2>
@@ -4095,18 +4176,24 @@ async function savePurchaseRecord(id){
     paymentStatus:newStatus,paidDate,
     mode:document.getElementById('pm-mode')?.value||'Bank Transfer',
     remarks:document.getElementById('pm-rem')?.value||'',createdAt:existing?.createdAt||new Date().toISOString()});
+  await Audit.log(existing?'purchase_edited':'purchase_added','purchase',purId,
+    existing?{before:{quantity:existing.quantity,invoiceAmount:existing.invoiceAmount,paymentStatus:existing.paymentStatus},after:{quantity:qty,invoiceAmount:amt,paymentStatus:newStatus}}
+    :{date,product,quantity:qty,invoiceAmount:amt,supplierName:document.getElementById('pm-supp')?.value||''});
   toast(`Purchase saved — ${product} ${fmt.num(qty)}L${amt?' · ₹'+fmt.num(amt/qty)+'/L':''}${id?'':' ↗ added to Stock Ledger'}`,'success');
   if(_spCache){if(qty>0)_spCache.purchases[`${date}_${product}`]=(_spCache.purchases[`${date}_${product}`]||0)+qty;}
   closeModal();await renderPurchasesTab(document.getElementById('sp-tab-content'));
 }
 async function deletePurchaseRecord(id){
   showConfirm('Delete Purchase','This will remove the purchase and affect stock calculations.',async()=>{
-    DB.del(`pbms_purchase_${id}`);toast('Purchase deleted','success');
+    const rec=DB.get(`pbms_purchase_${id}`);
+    if(rec)DB.set(`pbms_purchase_${id}`,{...rec,deleted:true,deletedAt:new Date().toISOString(),deletedBy:APP.userEmail||'Manager'});
+    await Audit.log('purchase_deleted','purchase',id,{date:rec?.date,product:rec?.product,quantity:rec?.quantity,invoiceAmount:rec?.invoiceAmount});
+    toast('Purchase deleted','success');
     await renderPurchasesTab(document.getElementById('sp-tab-content'));
   });
 }
 async function confirmMarkPaid(id){
-  const p=DB.get(`pbms_purchase_${id}`);if(!p)return;
+  const p=DB.getActive(`pbms_purchase_${id}`);if(!p)return;
   showConfirm(`Mark as Paid?`,`${p.supplierName||'Supplier'} — ${p.product} ${fmt.num(p.quantity||0)}L — ${fmt.currency(p.invoiceAmount||0)}`,async()=>{
     p.paymentStatus='Paid';p.paidDate=fmt.today();DB.set(`pbms_purchase_${id}`,p);
     toast('Purchase marked as Paid — Bank Balance updated','success');
@@ -4116,8 +4203,8 @@ async function confirmMarkPaid(id){
 
 async function downloadPurchasesExcel(){
   if(typeof XLSX==='undefined'){toast('Excel library not loaded','error');return;}
-  const purKeys=DB.listKeys('pbms_purchase_');const rows=[];
-  for(const k of purKeys){const p=DB.get(k);if(!p)continue;
+  const purKeys=DB.listActive('pbms_purchase_');const rows=[];
+  for(const p of purKeys){if(!p)continue;
     if(APP.tabs.purProd!=='all'&&p.product!==APP.tabs.purProd)continue;
     if(APP.tabs.purStatus!=='all'&&p.paymentStatus!==APP.tabs.purStatus)continue;
     if(p.date<(APP.tabs.purFrom||'')&&APP.tabs.purFrom)continue;
@@ -4206,8 +4293,7 @@ async function loadCreditTab(tab){
 }
 
 async function renderCreditManagement(el){
-  const custKeys=DB.listKeys('pbms_customer_');
-  const customers=[];for(const k of custKeys){const c=DB.get(k);if(c)customers.push(c);}
+  const customers=DB.listActive('pbms_customer_');
   customers.sort((a,b)=>a.name.localeCompare(b.name));
   const outstanding=await Promise.all(customers.map(c=>getCustomerOutstanding(c.id)));
   const totalOut=outstanding.reduce((s,v)=>s+v,0);
@@ -4248,7 +4334,7 @@ async function renderCreditManagement(el){
 }
 
 async function showAddCustomerModal(id){
-  const cust=id?DB.get(`pbms_customer_${id}`):null;
+  const cust=id?DB.getActive(`pbms_customer_${id}`):null;
   showModal(`<div class="p-6">
     <div class="flex items-center justify-between mb-5">
       <h2 class="text-lg font-bold text-slate-800">${id?'Edit':'Add'} Customer</h2>
@@ -4277,18 +4363,22 @@ async function saveCustomer(id){
     creditLimit:parseFloat(document.getElementById('cust-limit')?.value)||null,
     address:document.getElementById('cust-addr')?.value||''};
   DB.set(`pbms_customer_${custId}`,cust);
+  await Audit.log(id?'customer_edited':'customer_added','customer',custId,{name,creditLimit:cust.creditLimit});
   toast(id?'Customer updated':'Customer added','success');
   closeModal();await loadCreditTab('credit');
 }
 
 async function deleteCustomer(id){
   showConfirm('Delete Customer','All credit sales and payments for this customer will remain. The customer record will be removed.',async()=>{
-    DB.del(`pbms_customer_${id}`);toast('Customer deleted','success');await loadCreditTab('credit');
+    const rec=DB.get(`pbms_customer_${id}`);
+    if(rec)DB.set(`pbms_customer_${id}`,{...rec,deleted:true,deletedAt:new Date().toISOString(),deletedBy:APP.userEmail||'Manager'});
+    await Audit.log('customer_deleted','customer',id,{name:rec?.name,creditLimit:rec?.creditLimit});
+    toast('Customer deleted','success');await loadCreditTab('credit');
   });
 }
 
 async function showCreditSaleModal(custId){
-  const cust=DB.get(`pbms_customer_${custId}`);
+  const cust=DB.getActive(`pbms_customer_${custId}`);
   const settings=APP.settings||{};
   const products=(settings.products||[]).filter(p=>p.active);
   const firstProd=products[0]||{id:'HSD',name:'HSD',rate:0};
@@ -4378,7 +4468,7 @@ function calcCreditSaleAmt(){
 
 async function saveCreditSale(custId){
   const saleType=document.getElementById('cs-sale-type')?.value||'HSD';
-  const cust=DB.get(`pbms_customer_${custId}`);
+  const cust=DB.getActive(`pbms_customer_${custId}`);
   const saleId=`CSALE-${Date.now()}`;
 
   if(saleType==='CashAdvance'){
@@ -4391,6 +4481,7 @@ async function saveCreditSale(custId){
     DB.set(`pbms_credit_sale_${saleId}`,{id:saleId,customerId:custId,
       customerName:cust?.name||'',date,saleType:'CashAdvance',product:'Cash',
       quantity:0,rate:0,amount,givenVia,referenceNo,note,status:'Unpaid',createdAt:new Date().toISOString()});
+    await Audit.log('credit_sale_added','credit_sale',saleId,{customerId:custId,customerName:cust?.name,saleType:'CashAdvance',amount});
     const routeMsg=givenVia==='Cash'?'Deducted from today\'s cash settlement.':'Deducted from bank balance.';
     toast(`Cash advance of ${fmt.currency(amount)} recorded. ${routeMsg}`,'success');
   } else {
@@ -4404,13 +4495,14 @@ async function saveCreditSale(custId){
       vehicleNo:document.getElementById('cs-veh')?.value||'',
       driverName:document.getElementById('cs-driver')?.value||'',
       remarks:document.getElementById('cs-rem')?.value||'',status:'Unpaid',createdAt:new Date().toISOString()});
+    await Audit.log('credit_sale_added','credit_sale',saleId,{customerId:custId,customerName:cust?.name,product,quantity:qty,amount:qty*rate});
     toast('Credit sale added','success');
   }
   closeModal();await loadCreditTab('credit');
 }
 
 async function showPaymentModal(custId){
-  const cust=DB.get(`pbms_customer_${custId}`);
+  const cust=DB.getActive(`pbms_customer_${custId}`);
   const out=await getCustomerOutstanding(custId);
   showModal(`<div class="p-6">
     <div class="flex items-center justify-between mb-5">
@@ -4447,7 +4539,7 @@ async function savePayment(custId){
 }
 
 async function showCustomerLedger(custId){
-  const cust=DB.get(`pbms_customer_${custId}`);
+  const cust=DB.getActive(`pbms_customer_${custId}`);
   const sKeys=DB.listKeys('pbms_credit_sale_');
   const pKeys=DB.listKeys('pbms_payment_');
   const sales=[];for(const k of sKeys){const s=DB.get(k);if(s&&s.customerId===custId)sales.push(s);}
@@ -4497,16 +4589,13 @@ async function showCustomerLedger(custId){
 // ====================================================
 async function renderLoanManagement(el){
   // Load all loans
-  const loanKeys=DB.listKeys('pbms_loan_');
-  const loans=[];
-  for(const k of loanKeys){const l=DB.get(k);if(l)loans.push(l);}
+  const loans=DB.listActive('pbms_loan_');
   loans.sort((a,b)=>(b.startDate||'').localeCompare(a.startDate||''));
 
   // Load ALL repayments in one pass, bucket by loanId
-  const repKeys=DB.listKeys('pbms_loan_repayment_');
+  const repKeys=DB.listActive('pbms_loan_repayment_');
   const repByLoan={};
-  for(const k of repKeys){
-    const r=DB.get(k);
+  for(const r of repKeys){
     if(!r)continue;
     if(!repByLoan[r.loanId])repByLoan[r.loanId]=[];
     repByLoan[r.loanId].push(r);
@@ -4664,6 +4753,7 @@ async function saveLoan(existingId){
     receivedVia:document.getElementById('loan-mode')?.value||'Bank Transfer',
     purpose:document.getElementById('loan-purpose')?.value||'',
     remarks:document.getElementById('loan-rem')?.value||'',createdAt:existing?.createdAt||new Date().toISOString()});
+  await Audit.log(existingId?'loan_edited':'loan_added','loan',loanId,{lenderName:lender,startDate:date,principalAmount:principal});
   toast(existingId?'Loan updated':'Loan added','success');
   closeModal();
   await loadCreditTab('loan');
@@ -4672,22 +4762,25 @@ async function saveLoan(existingId){
 async function deleteLoan(id){
   requirePIN('Deleting a loan record requires manager approval',()=>{
   showConfirm('Delete Loan','Repayment records will also be removed.',async()=>{
-    DB.del(`pbms_loan_${id}`);
+    const loanRec=DB.get(`pbms_loan_${id}`);
+    const deletedAt=new Date().toISOString();const deletedBy=APP.userEmail||'Manager';
+    if(loanRec)DB.set(`pbms_loan_${id}`,{...loanRec,deleted:true,deletedAt,deletedBy});
     const rKeys=DB.listKeys('pbms_loan_repayment_');
-    for(const k of rKeys){const r=DB.get(k);if(r?.loanId===id)DB.del(k);}
+    for(const k of rKeys){const r=DB.get(k);if(r?.loanId===id)DB.set(k,{...r,deleted:true,deletedAt,deletedBy});}
+    await Audit.log('loan_deleted','loan',id,{lenderName:loanRec?.lenderName,principalAmount:loanRec?.principalAmount});
     toast('Loan deleted','success');await loadCreditTab('loan');
   });
   });
 }
 
 async function showRepaymentModal(loanId){
-  const loan=DB.get(`pbms_loan_${loanId}`);
+  const loan=DB.getActive(`pbms_loan_${loanId}`);
   if(!loan){toast('Loan not found','error');return;}
 
   // Single-pass outstanding calculation
-  const rKeys=DB.listKeys('pbms_loan_repayment_');
+  const rKeys=DB.listActive('pbms_loan_repayment_');
   let totalRepaid=0;
-  for(const k of rKeys){const r=DB.get(k);if(r?.loanId===loanId)totalRepaid+=(r.amount||0);}
+  for(const r of rKeys){if(r?.loanId===loanId)totalRepaid+=(r.amount||0);}
   const outstanding=Math.max(0,(loan.principalAmount||0)-totalRepaid);
 
   if(outstanding<=0){toast('This loan is already fully repaid','info');return;}
@@ -4753,10 +4846,10 @@ async function saveRepayment(loanId){
   if(amt<=0){toast('Enter a valid amount','error');return;}
 
   // Overpayment guard — recalculate outstanding inline
-  const loan=DB.get(`pbms_loan_${loanId}`);
-  const rKeys=DB.listKeys('pbms_loan_repayment_');
+  const loan=DB.getActive(`pbms_loan_${loanId}`);
+  const rKeys=DB.listActive('pbms_loan_repayment_');
   let totalRepaid=0;
-  for(const k of rKeys){const r=DB.get(k);if(r?.loanId===loanId)totalRepaid+=(r.amount||0);}
+  for(const r of rKeys){if(r?.loanId===loanId)totalRepaid+=(r.amount||0);}
   const outstanding=Math.max(0,(loan?.principalAmount||0)-totalRepaid);
   if(amt>outstanding+0.01){
     toast(`Amount ₹${amt.toFixed(2)} exceeds outstanding ₹${outstanding.toFixed(2)}`,'error');return;
@@ -4778,13 +4871,13 @@ async function saveRepayment(loanId){
 }
 
 async function showLoanLedger(loanId){
-  const loan=DB.get(`pbms_loan_${loanId}`);
+  const loan=DB.getActive(`pbms_loan_${loanId}`);
   if(!loan){toast('Loan not found','error');return;}
 
   // Single-pass repayment load filtered by loanId
-  const rKeys=DB.listKeys('pbms_loan_repayment_');
+  const rKeys=DB.listActive('pbms_loan_repayment_');
   const repayments=[];
-  for(const k of rKeys){const r=DB.get(k);if(r?.loanId===loanId)repayments.push(r);}
+  for(const r of rKeys){if(r?.loanId===loanId)repayments.push(r);}
   repayments.sort((a,b)=>(a.date||'').localeCompare(b.date||''));
 
   const principal=loan.principalAmount||0;
@@ -4871,7 +4964,7 @@ async function showLoanLedger(loanId){
 }
 
 async function editLoan(id){
-  const loan=DB.get(`pbms_loan_${id}`);
+  const loan=DB.getActive(`pbms_loan_${id}`);
   if(!loan){toast('Loan not found','error');return;}
   showModal(`<div class="p-6">
     <div class="flex items-center justify-between mb-5">
@@ -5029,10 +5122,9 @@ async function loadSettlementForDate(date){
   // Load existing settlement (if already saved)
   const saved=DB.get(`pbms_daily_settlement_${date}`);
   // Auto-sum cash expenses from pbms_expense_* for this date
-  const expKeys2=DB.listKeys('pbms_expense_');
+  const expKeys2=DB.listActive('pbms_expense_');
   const cashExpItems=[];let autoCashExp=0;
-  for(const k of expKeys2){
-    const e=DB.get(k);
+  for(const e of expKeys2){
     if(!e||e.date!==date)continue;
     if(!e.mode||e.mode==='Cash'){cashExpItems.push({...e,_src:'expense'});autoCashExp+=e.amount||0;}
   }
@@ -5050,9 +5142,8 @@ async function loadSettlementForDate(date){
   // Fuel purchases paid in Cash (dated by the actual paidDate, not the invoice
   // date) — otherwise a cash fuel payment silently vanishes from both this
   // settlement and the Bank Book, overstating cash available to deposit.
-  const purKeys2=DB.listKeys('pbms_purchase_');
-  for(const k of purKeys2){
-    const p=DB.get(k);
+  const purKeys2=DB.listActive('pbms_purchase_');
+  for(const p of purKeys2){
     if(!p||p.paymentStatus!=='Paid')continue;
     const payDate=p.paidDate||p.date;
     if(payDate!==date||(p.mode||'Bank Transfer')!=='Cash')continue;
@@ -5061,18 +5152,17 @@ async function loadSettlementForDate(date){
     autoCashExp+=p.invoiceAmount||0;
   }
   // Loan repayments made in Cash
-  const repKeys2=DB.listKeys('pbms_loan_repayment_');
-  for(const k of repKeys2){
-    const r=DB.get(k);
+  const repKeys2=DB.listActive('pbms_loan_repayment_');
+  for(const r of repKeys2){
     if(!r||r.date!==date||r.mode!=='Cash')continue;
     cashExpItems.push({description:`${r.lenderName||'Lender'} — Loan Repayment`,
       category:'Loan Repayment (Cash)',amount:r.amount||0,_src:'loanrepay'});
     autoCashExp+=r.amount||0;
   }
   // Oil/Lube purchase payments made in Cash
-  const olKeys2=DB.listKeys('pbms_oil_purchase_');
-  for(const k of olKeys2){
-    const p=DB.get(k);if(!p||!p.payments)continue;
+  const olKeys2=DB.listActive('pbms_oil_purchase_');
+  for(const p of olKeys2){
+    if(!p||!p.payments)continue;
     for(const pay of p.payments){
       if(!pay||pay.date!==date||pay.mode!=='Cash'||(pay.amount||0)<=0)continue;
       cashExpItems.push({description:`${p.supplier||'Oil/Lube'} — Oil/Lube Purchase`,
@@ -5081,9 +5171,9 @@ async function loadSettlementForDate(date){
     }
   }
   // Shop (retail) purchase payments made in Cash
-  const shopPurKeys2=DB.listKeys('shop_purchase_');
-  for(const k of shopPurKeys2){
-    const p=DB.get(k);if(!p||!p.payments)continue;
+  const shopPurKeys2=listShopPurchases();
+  for(const p of shopPurKeys2){
+    if(!p||!p.payments)continue;
     for(const pay of p.payments){
       if(!pay||pay.date!==date||pay.mode!=='Cash'||(pay.amount||0)<=0)continue;
       cashExpItems.push({description:`Shop purchase ${p.ref||''}`,
@@ -5160,7 +5250,7 @@ async function loadSettlementForDate(date){
           ${isOverridden?`<button onclick="resetSettlExpAuto('${date}')"
             class="btn btn-ghost btn-sm text-xs no-print text-blue-600">↺ Use Auto (${fmt.currency(autoCashExp)})</button>`:''}
         </div>
-        ${cashExpItems.length?`<button onclick="toggleExpBreakdown()" class="text-xs text-blue-600 hover:text-blue-800 underline">
+        ${cashExpItems.length?`<button onclick="toggleExpBreakdown()" class="text-xs text-blue-600 hover:text-blue-800 underline inline-block py-2 -my-2">
           View Details (${cashExpItems.length} item${cashExpItems.length!==1?'s':''})</button>`:'<span class="text-xs text-slate-400">No cash outflows today</span>'}
       </div>
       ${cashExpItems.length?`<div id="exp-breakdown" class="hidden mt-3 border border-slate-200 rounded-lg overflow-hidden">
@@ -5541,11 +5631,9 @@ async function buildBankBook(fromDate,toDate){
   const stats={openingBalance:0,totalIn:0,totalOut:0,cashDep:0,upi:0,card:0,credit:0,loanIn:0,fuelOut:0,loanOut:0,advanceOut:0,expOut:0,incentiveDueIn:0,oilOut:0,shopIn:0,shopOut:0};
 
   // ── Pre-load all reference data in single passes (no N+1) ──
-  const custKeys=DB.listKeys('pbms_customer_');
-  const custMap={};for(const k of custKeys){const c=DB.get(k);if(c)custMap[c.id]=c;}
+  const custMap={};for(const c of DB.listActive('pbms_customer_')){if(c)custMap[c.id]=c;}
 
-  const loanKeys=DB.listKeys('pbms_loan_');
-  const loanMap={};for(const k of loanKeys){const l=DB.get(k);if(l)loanMap[l.id]=l;}
+  const loanMap={};for(const l of DB.listActive('pbms_loan_')){if(l)loanMap[l.id]=l;}
 
   // 1. Opening balance
   const ob=DB.get('pbms_bank_opening_balance');
@@ -5596,9 +5684,9 @@ async function buildBankBook(fromDate,toDate){
   }
 
   // 5. Loan repayments — use pre-loaded loanMap (no extra DB calls)
-  const repayKeys=DB.listKeys('pbms_loan_repayment_');
-  for(const k of repayKeys){
-    const r=DB.get(k);if(!r||r.date<fromDate||r.date>toDate)continue;
+  const repayKeys=DB.listActive('pbms_loan_repayment_');
+  for(const r of repayKeys){
+    if(!r||r.date<fromDate||r.date>toDate)continue;
     if(r.mode==='Cash')continue;
     const lenderName=loanMap[r.loanId]?.lenderName||r.lenderName||'Lender';
     rows.push({date:r.date,desc:`${lenderName} — ${r.remarks||'repayment'}${r.referenceNo?' · '+r.referenceNo:''}`,type:'Loan Repaid',ref:r.referenceNo||'',in:0,out:r.amount||0,createdAt:r.createdAt});
@@ -5617,9 +5705,9 @@ async function buildBankBook(fromDate,toDate){
   // 7. Paid fuel purchases (only Bank Transfer mode touches the bank) — dated by the
   // actual payment date (paidDate), not the invoice/purchase date, so settling an old
   // credit purchase doesn't retroactively rewrite an already-closed month's balance.
-  const purKeys=DB.listKeys('pbms_purchase_');const pending=[];
-  for(const k of purKeys){
-    const p=DB.get(k);if(!p)continue;
+  const purKeys=DB.listActive('pbms_purchase_');const pending=[];
+  for(const p of purKeys){
+    if(!p)continue;
     const payDate=p.paidDate||p.date; // legacy records (pre-paidDate) fall back to purchase date
     if(p.paymentStatus==='Paid'){
       if(payDate<fromDate||payDate>toDate)continue;
@@ -5631,9 +5719,9 @@ async function buildBankBook(fromDate,toDate){
   }
 
   // 8. Oil/lube paid purchases (outflow) — one row per actual payment date
-  const olKeys=DB.listKeys('pbms_oil_purchase_');
-  for(const k of olKeys){
-    const p=DB.get(k);if(!p)continue;
+  const olKeys=DB.listActive('pbms_oil_purchase_');
+  for(const p of olKeys){
+    if(!p)continue;
     // payments[] holds each cash-out event; legacy records (pre-fix) only have a
     // cumulative paidAmount with no dated breakdown, so fall back to one row on
     // the purchase date for those.
@@ -5647,18 +5735,18 @@ async function buildBankBook(fromDate,toDate){
   }
 
   // 9. Non-cash expenses (outflow)
-  const expKeys=DB.listKeys('pbms_expense_');
-  for(const k of expKeys){
-    const e=DB.get(k);if(!e||e.date<fromDate||e.date>toDate)continue;
+  const expKeys=DB.listActive('pbms_expense_');
+  for(const e of expKeys){
+    if(!e||e.date<fromDate||e.date>toDate)continue;
     if(!e.mode||e.mode==='Cash')continue;
     rows.push({date:e.date,desc:`${e.description||'Expense'} (${e.category})`,type:'Bank Expense',ref:'',in:0,out:e.amount||0,createdAt:e.createdAt});
     stats.expOut+=e.amount||0;stats.totalOut+=e.amount||0;
   }
 
   // 9b. Shop (retail) purchase payments — non-cash modes touch the bank
-  const shopPurKeys=DB.listKeys('shop_purchase_');
-  for(const k of shopPurKeys){
-    const p=DB.get(k);if(!p||!p.payments)continue;
+  const shopPurKeys=listShopPurchases();
+  for(const p of shopPurKeys){
+    if(!p||!p.payments)continue;
     for(const pay of p.payments){
       if(!pay||pay.date<fromDate||pay.date>toDate||(pay.amount||0)<=0)continue;
       if(!pay.mode||pay.mode==='Cash')continue;
@@ -5671,9 +5759,9 @@ async function buildBankBook(fromDate,toDate){
   // non-cash recovery (cash/UPI/card sales at billing time already flow in
   // via the Daily Settlement rows above, so only count non-Cash payments
   // that were recorded after invoice creation to avoid double counting)
-  const shopSaleKeys=DB.listKeys('shop_sale_');
-  for(const k of shopSaleKeys){
-    const s=DB.get(k);if(!s||!s.payments||s.payments.length<2)continue;
+  const shopSaleKeys=listShopSales();
+  for(const s of shopSaleKeys){
+    if(!s||!s.payments||s.payments.length<2)continue;
     for(let i=1;i<s.payments.length;i++){
       const pay=s.payments[i];
       if(!pay||pay.date<fromDate||pay.date>toDate||(pay.amount||0)<=0)continue;
@@ -5699,7 +5787,7 @@ async function buildBankBook(fromDate,toDate){
 }
 
 async function markPurchasePaid(id){
-  const p=DB.get(`pbms_purchase_${id}`);if(!p)return;
+  const p=DB.getActive(`pbms_purchase_${id}`);if(!p)return;
   showConfirm('Mark as Paid',`Mark ${p.supplierName||'this purchase'} (${fmt.currency(p.invoiceAmount||0)}) as paid? This will deduct from the bank balance.`,async()=>{
     p.paymentStatus='Paid';p.paidDate=fmt.today();DB.set(`pbms_purchase_${id}`,p);
     toast('Marked paid — bank balance updated','success');
@@ -5769,8 +5857,7 @@ async function loadExpTab(tab){
 }
 
 async function renderExpensesTab(el){
-  const expenses=[];const expKeys=DB.listKeys('pbms_expense_');
-  for(const k of expKeys){const e=DB.get(k);if(e)expenses.push(e);}
+  const expenses=DB.listActive('pbms_expense_');
   expenses.sort((a,b)=>(b.date||'').localeCompare(a.date||'')||(b.id||'').localeCompare(a.id||''));
   const today=fmt.today();const thisMonth=today.slice(0,7);
   const monthly=expenses.filter(e=>e.date.startsWith(thisMonth));
@@ -5973,6 +6060,7 @@ async function saveExpense(){
   if(amt<=0){toast('Enter amount','error');return;}
   const expId=`EXP-${Date.now()}`;
   DB.set(`pbms_expense_${expId}`,{id:expId,date,category:cat,description:desc,amount:amt,mode,paidTo,reference:ref,approvedBy,createdAt:new Date().toISOString()});
+  await Audit.log('expense_added','expense',expId,{date,category:cat,amount:amt,mode,paidTo});
   if(mode==='Cash'){
     toast(`${fmt.currency(amt)} cash expense recorded — deducted from today's cash settlement`,'success');
   } else {
@@ -5988,8 +6076,8 @@ async function downloadExpensesExcel(){
   const mode=document.getElementById('exp-filter-mode')?.value||'';
   const from=document.getElementById('exp-filter-from')?.value||'';
   const to=document.getElementById('exp-filter-to')?.value||'';
-  const expKeys=DB.listKeys('pbms_expense_');const rows=[];
-  for(const k of expKeys){const e=DB.get(k);if(!e)continue;
+  const expKeys=DB.listActive('pbms_expense_');const rows=[];
+  for(const e of expKeys){if(!e)continue;
     if(cat&&e.category!==cat)continue;
     if(mode&&(e.mode||'Cash')!==mode)continue;
     if(from&&e.date<from)continue;
@@ -6013,7 +6101,10 @@ function downloadExpensesPDF(){
 
 async function deleteExpense(id){
   showConfirm('Delete Expense','Remove this expense record?',async()=>{
-    DB.del(`pbms_expense_${id}`);toast('Expense deleted','success');
+    const rec=DB.get(`pbms_expense_${id}`);
+    if(rec)DB.set(`pbms_expense_${id}`,{...rec,deleted:true,deletedAt:new Date().toISOString(),deletedBy:APP.userEmail||'Manager'});
+    await Audit.log('expense_deleted','expense',id,{date:rec?.date,category:rec?.category,amount:rec?.amount,description:rec?.description});
+    toast('Expense deleted','success');
     await renderExpensesTab(document.getElementById('exp-tab-content'));
   });
 }
@@ -6318,12 +6409,30 @@ function computeDailyReportData(date){
     fuelCash+=col.cashAmt||0; fuelUpi+=col.upiAmt||0; fuelCard+=col.cardAmt||0;
     fuelCredit+=col.creditAmt||0; fuelOil+=col.oilAmt||0; fuelDiscount+=col.discountAmt||0;
   }
+
+  // Shop (retail) sales for this date — same payment-mode logic already
+  // used by the Daily Settlement tab in Cash & Banking (listShopSales +
+  // shopBalanceDue). The Daily Report's cash totals previously omitted
+  // this entirely, so its Net Cash Position could disagree with the
+  // actual Daily Settlement figure for the same day.
+  const shopSalesToday=listShopSales().filter(sale=>sale.date===date);
+  let shopCash=0,shopUpi=0,shopCard=0,shopCredit=0;
+  for(const sale of shopSalesToday){
+    const due=shopBalanceDue(sale);
+    const mode=(sale.payments&&sale.payments[0]?.mode)||'';
+    if(due>0.004)shopCredit+=due;
+    if(mode==='Cash')shopCash+=(sale.payments[0].amount||0);
+    else if(mode==='UPI')shopUpi+=(sale.payments[0].amount||0);
+    else if(mode==='Card')shopCard+=(sale.payments[0].amount||0);
+  }
+
   const fuelNet=fuelCash+fuelUpi+fuelCard+fuelCredit;
+  const shopNet=shopCash+shopUpi+shopCard+shopCredit;
 
   // ── 2. STOCK & PURCHASES ──
-  const purKeys=DB.listKeys('pbms_purchase_');
+  const purKeys=DB.listActive('pbms_purchase_');
   let purTotal=0; const purRows=[];
-  for(const k of purKeys){const p=DB.get(k);if(p&&p.date===date){purTotal+=p.invoiceAmount||0;purRows.push(p);}}
+  for(const p of purKeys){if(p&&p.date===date){purTotal+=p.invoiceAmount||0;purRows.push(p);}}
 
   // Stock variance / pilferage check — Expected Closing = Opening (from
   // yesterday's dip) + Purchases − Litres Sold (from handover nozzle
@@ -6347,9 +6456,9 @@ function computeDailyReportData(date){
   const stockVarianceFlagCount=stockVarianceRows.filter(r=>r.flagged).length;
 
   // ── 3. EXPENSES ──
-  const expKeys=DB.listKeys('pbms_expense_');
+  const expKeys=DB.listActive('pbms_expense_');
   let expTotal=0; const expRows=[];
-  for(const k of expKeys){const e=DB.get(k);if(e&&e.date===date){expTotal+=(e.amount||0);expRows.push(e);}}
+  for(const e of expKeys){if(e&&e.date===date){expTotal+=(e.amount||0);expRows.push(e);}}
 
   // ── 4. CREDIT SALES ──
   const csKeys=DB.listKeys('pbms_credit_sale_');
@@ -6357,9 +6466,9 @@ function computeDailyReportData(date){
   for(const k of csKeys){const cs=DB.get(k);if(cs&&cs.date===date){csTotal+=(cs.amount||0);csRows.push(cs);}}
 
   // ── 5. LOAN PAYMENTS ──
-  const payKeys=DB.listKeys('pbms_loan_repayment_');
+  const payKeys=DB.listActive('pbms_loan_repayment_');
   let loanRepayTotal=0;
-  for(const k of payKeys){const r=DB.get(k);if(r&&r.date===date)loanRepayTotal+=(r.amount||0);}
+  for(const r of payKeys){if(r&&r.date===date)loanRepayTotal+=(r.amount||0);}
 
   // ── 6. CASH & BANKING ──
   const bankKeys=DB.listKeys('pbms_bank_tx_');
@@ -6381,17 +6490,18 @@ function computeDailyReportData(date){
 
   // ── 9. TODAY'S TOTAL CASH IN / CASH OUT — all payment modes (cash + bank) ──
   let loanReceivedAll=0;
-  for(const k of DB.listKeys('pbms_loan_')){const l=DB.get(k);if(l&&l.startDate===date)loanReceivedAll+=(l.principalAmount||0);}
+  for(const l of DB.listActive('pbms_loan_')){if(l&&l.startDate===date)loanReceivedAll+=(l.principalAmount||0);}
   let incentiveAll=0;
   for(const k of DB.listKeys('pbms_incentive_due_')){const d=DB.get(k);if(d&&d.date===date)incentiveAll+=(d.amount||0);}
   let purchasePaidTotal=0;
-  for(const k of purKeys){const p=DB.get(k);if(p&&p.date===date&&p.paymentStatus==='Paid')purchasePaidTotal+=(p.invoiceAmount||0);}
-  const salesNetCollected=fuelCash+fuelUpi+fuelCard;
+  for(const p of purKeys){if(p&&p.date===date&&p.paymentStatus==='Paid')purchasePaidTotal+=(p.invoiceAmount||0);}
+  const salesNetCollected=fuelCash+fuelUpi+fuelCard+shopCash+shopUpi+shopCard;
   const todayCashInAll=salesNetCollected+cpTotal+loanReceivedAll+incentiveAll;
   const todayCashOutAll=purchasePaidTotal+loanRepayTotal+expTotal;
 
   return{date,daySessions,settledSessions,fuelHsd,fuelMs,fuelAmt,pendingSettleCount,pendingSettleAmt,
     fuelCash,fuelUpi,fuelCard,fuelCredit,fuelOil,fuelDiscount,fuelNet,
+    shopSalesToday,shopCash,shopUpi,shopCard,shopCredit,shopNet,
     purTotal,purRows,expTotal,expRows,csTotal,csRows,loanRepayTotal,
     bankDeposit,bankWithdraw,cpTotal,stockLevels,stockVarianceRows,stockVarianceFlagCount,stockTolerance,
     loanReceivedAll,incentiveAll,purchasePaidTotal,salesNetCollected,todayCashInAll,todayCashOutAll};
@@ -6408,6 +6518,7 @@ async function loadDailyReport(){
 
   const{daySessions,settledSessions,fuelHsd,fuelMs,fuelAmt,pendingSettleCount,pendingSettleAmt,
     fuelCash,fuelUpi,fuelCard,fuelCredit,fuelOil,fuelDiscount,fuelNet,
+    shopSalesToday,shopCash,shopUpi,shopCard,shopCredit,shopNet,
     purTotal,purRows,expTotal,expRows,csTotal,csRows,loanRepayTotal,
     bankDeposit,bankWithdraw,cpTotal,stockLevels,stockVarianceRows,stockVarianceFlagCount,
     loanReceivedAll,incentiveAll,purchasePaidTotal,salesNetCollected,todayCashInAll,todayCashOutAll
@@ -6428,8 +6539,8 @@ async function loadDailyReport(){
       <div class="text-lg font-bold text-slate-800">${fmt.litres(fuelHsd+fuelMs)}</div>
     </div>
     <div class="card p-3">
-      <div class="text-xs text-slate-500 mb-1">Total Sales ₹ (Fuel + Oil)</div>
-      <div class="text-lg font-bold text-slate-800">${fmt.currency(fuelAmt+fuelOil)}</div>
+      <div class="text-xs text-slate-500 mb-1">Total Sales ₹ (Fuel + Oil + Shop)</div>
+      <div class="text-lg font-bold text-slate-800">${fmt.currency(fuelAmt+fuelOil+shopSalesToday.reduce((a,sale)=>a+(sale.total||0),0))}</div>
     </div>
     <div class="card p-3">
       <div class="text-xs text-slate-500 mb-1">Net Cash Position</div>
@@ -6483,13 +6594,14 @@ async function loadDailyReport(){
         const c=ss.collections||{};
         return`<tr><td>${ss.employeeName||'—'}</td><td class="text-xs text-slate-500">${fmt.date(ss.checkInDate)}</td><td class="text-right font-mono">${(c.oilAmt||0)?fmt.currency(c.oilAmt):'—'}</td><td class="text-right font-mono text-green-700">${(c.cashAmt||0)?fmt.currency(c.cashAmt):'—'}</td><td class="text-right font-mono text-green-700">${(c.upiAmt||0)?fmt.currency(c.upiAmt):'—'}</td><td class="text-right font-mono">${(c.cardAmt||0)?fmt.currency(c.cardAmt):'—'}</td><td class="text-right font-mono text-amber-600">${(c.creditAmt||0)?fmt.currency(c.creditAmt):'—'}</td></tr>`;
       }).join('')}
+      ${shopSalesToday.length?`<tr class="bg-slate-50"><td colspan="2" class="text-slate-500 italic">🛒 Shop Sales (${shopSalesToday.length} invoice(s))</td><td class="text-right font-mono">—</td><td class="text-right font-mono text-green-700">${shopCash?fmt.currency(shopCash):'—'}</td><td class="text-right font-mono text-green-700">${shopUpi?fmt.currency(shopUpi):'—'}</td><td class="text-right font-mono">${shopCard?fmt.currency(shopCard):'—'}</td><td class="text-right font-mono text-amber-600">${shopCredit?fmt.currency(shopCredit):'—'}</td></tr>`:''}
       <tr class="font-bold bg-slate-50 border-t-2 border-slate-300">
         <td colspan="2">TOTAL</td>
         <td class="text-right font-mono">${fuelOil?fmt.currency(fuelOil):'—'}</td>
-        <td class="text-right font-mono text-green-700">${fmt.currency(fuelCash)}</td>
-        <td class="text-right font-mono text-green-700">${fmt.currency(fuelUpi)}</td>
-        <td class="text-right font-mono">${fmt.currency(fuelCard)}</td>
-        <td class="text-right font-mono text-amber-600">${fmt.currency(fuelCredit)}</td>
+        <td class="text-right font-mono text-green-700">${fmt.currency(fuelCash+shopCash)}</td>
+        <td class="text-right font-mono text-green-700">${fmt.currency(fuelUpi+shopUpi)}</td>
+        <td class="text-right font-mono">${fmt.currency(fuelCard+shopCard)}</td>
+        <td class="text-right font-mono text-amber-600">${fmt.currency(fuelCredit+shopCredit)}</td>
       </tr></tbody></table></div>`}
   </div>
 
@@ -6591,7 +6703,7 @@ async function downloadDailyExcel(){
   const s=APP.settings||{};
   const wb=XLSX.utils.book_new();
 
-  const{daySessions,settledSessions,purRows,expRows,csRows}=computeDailyReportData(date);
+  const{daySessions,settledSessions,shopSalesToday,purRows,expRows,csRows}=computeDailyReportData(date);
 
   // Fuel Dispensed sheet — by check-in/handover date, same source as the
   // on-screen Fuel Dispensed section (assignedNozzles/product, not the old
@@ -6615,6 +6727,15 @@ async function downloadDailyExcel(){
     return{'Employee':ss.employeeName||'—','Checked In':ss.checkInDate||'—','Oil₹':col.oilAmt||'','Cash':col.cashAmt||'','UPI':col.upiAmt||'','Card':col.cardAmt||'','Credit':col.creditAmt||''};
   });
   if(settleRows.length)XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(settleRows),'Settlements');
+
+  // Shop Sales sheet — same payment-mode source as the on-screen Shop
+  // Sales line in Cash Collected & Settled.
+  const shopRows=shopSalesToday.map(sale=>{
+    const mode=(sale.payments&&sale.payments[0]?.mode)||'—';
+    const due=shopBalanceDue(sale);
+    return{'Invoice':sale.invoiceNo||'—','Total₹':sale.total||0,'Mode':mode,'Balance Due₹':due>0.004?due:''};
+  });
+  if(shopRows.length)XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(shopRows),'Shop Sales');
 
   // Expenses sheet
   const expSheetRows=expRows.map(e=>({'Category':e.category||'—','Description':e.description||'—','Amount₹':e.amount||0,'Mode':e.mode||'—'}));
@@ -6866,7 +6987,7 @@ async function generateDailySalesStatement(){
   (settings.products||[]).forEach(p=>{prodMeta[p.id||p.name]={name:p.name||p.id,rate:p.rate||0,unit:p.unit||'L'};});
 
   // Day's tank lorry receipts
-  const receipts=DB.listKeys('pbms_purchase_').map(k=>DB.get(k)).filter(p=>p&&p.date===dateStr);
+  const receipts=DB.listActive('pbms_purchase_').filter(p=>p&&p.date===dateStr);
 
   // Dip readings for start (prev day or today opening) and end of day
   const dipToday=DB.get(`pbms_dip_${dateStr}`);
@@ -7028,7 +7149,7 @@ async function generateDipRegister(){
   const dips=DB.listKeys('pbms_dip_').map(k=>DB.get(k)).filter(d=>d&&d.date&&d.date.startsWith(monthStr));
   const dipByDate={};
   dips.forEach(d=>{dipByDate[d.date]=d;});
-  const purchases=DB.listKeys('pbms_purchase_').map(k=>DB.get(k)).filter(p=>p&&p.date&&p.date.startsWith(monthStr));
+  const purchases=DB.listActive('pbms_purchase_').filter(p=>p&&p.date&&p.date.startsWith(monthStr));
   const receiptsByDate={};
   purchases.forEach(p=>{
     if(!receiptsByDate[p.date])receiptsByDate[p.date]={};
@@ -7120,7 +7241,7 @@ async function generateMonthlyStockAccount(){
   const monthStr=document.getElementById('msa-month')?.value||fmt.today().slice(0,7);
   const [y,m]=monthStr.split('-').map(Number);
   const sessions=await getSalesForMonth(y,m);
-  const purchases=DB.listKeys('pbms_purchase_').map(k=>DB.get(k)).filter(p=>p&&p.date&&p.date.startsWith(monthStr));
+  const purchases=DB.listActive('pbms_purchase_').filter(p=>p&&p.date&&p.date.startsWith(monthStr));
 
   // Product id→name map
   const prodMap={};
@@ -7309,7 +7430,7 @@ async function generateCreditRegister(){
   const allPayments=DB.listKeys('pbms_payment_').map(k=>DB.get(k)).filter(p=>p&&p.customerId);
   // Customer master data
   const custMap={};
-  DB.listKeys('pbms_customer_').forEach(k=>{const c=DB.get(k);if(c&&c.id)custMap[c.id]=c;});
+  DB.listActive('pbms_customer_').forEach(c=>{if(c&&c.id)custMap[c.id]=c;});
 
   // This-month transaction detail rows
   const monthCredits=allCredits.filter(c=>c.date&&c.date.startsWith(monthStr))
@@ -7583,7 +7704,16 @@ async function loadAuditEntries(entityType){
   const el=document.getElementById('audit-entries-list');if(!el)return;
   const entries=await Audit.recent(entityType,300);
   if(!entries.length){el.innerHTML='<p class="text-sm text-slate-400 text-center py-8">No audit entries yet.</p>';return;}
-  const actionColors={session_submitted:'bg-green-100 text-green-800',session_deleted:'bg-red-100 text-red-800',settings_updated:'bg-blue-100 text-blue-800',repayment_added:'bg-purple-100 text-purple-800',expense_added:'bg-amber-100 text-amber-800'};
+  const actionColors={session_submitted:'bg-green-100 text-green-800',session_deleted:'bg-red-100 text-red-800',settings_updated:'bg-blue-100 text-blue-800',repayment_added:'bg-purple-100 text-purple-800',expense_added:'bg-amber-100 text-amber-800',session_checkin:'bg-sky-100 text-sky-800',session_handover:'bg-orange-100 text-orange-800',session_settled:'bg-green-100 text-green-800',session_edited:'bg-amber-100 text-amber-800',audit_archived:'bg-slate-200 text-slate-700',
+    expense_deleted:'bg-red-100 text-red-800',
+    purchase_added:'bg-green-100 text-green-800',purchase_edited:'bg-amber-100 text-amber-800',purchase_deleted:'bg-red-100 text-red-800',
+    oil_purchase_paid:'bg-purple-100 text-purple-800',oil_purchase_deleted:'bg-red-100 text-red-800',
+    loan_added:'bg-green-100 text-green-800',loan_edited:'bg-amber-100 text-amber-800',loan_deleted:'bg-red-100 text-red-800',
+    customer_added:'bg-green-100 text-green-800',customer_edited:'bg-amber-100 text-amber-800',customer_deleted:'bg-red-100 text-red-800',
+    credit_sale_added:'bg-green-100 text-green-800',
+    shop_sale_added:'bg-green-100 text-green-800',shop_sale_edited:'bg-amber-100 text-amber-800',shop_sale_deleted:'bg-red-100 text-red-800',
+    shop_purchase_added:'bg-green-100 text-green-800',shop_purchase_deleted:'bg-red-100 text-red-800',
+    shop_product_deleted:'bg-red-100 text-red-800',shop_party_deleted:'bg-red-100 text-red-800'};
   el.innerHTML=`<div class="overflow-x-auto"><table class="data-table text-xs w-full">
     <thead><tr><th class="text-left">Timestamp</th><th>Action</th><th>Entity</th><th>ID</th><th class="text-left">Details</th><th class="text-center">Chain</th></tr></thead>
     <tbody>${entries.map(e=>`<tr>
@@ -7659,12 +7789,10 @@ async function renderLoanTransactionsReport(el){
 }
 
 async function buildLoanLedger(from,to){
-  const loanKeys=DB.listKeys('pbms_loan_');
-  const loans={};for(const k of loanKeys){const l=DB.get(k);if(l)loans[l.id]=l;}
-  const allRepKeys=DB.listKeys('pbms_loan_repayment_');
+  const loans={};for(const l of DB.listActive('pbms_loan_')){if(l)loans[l.id]=l;}
   const allRepByLoan={};
-  const repaymentsAll=[];
-  for(const k of allRepKeys){const r=DB.get(k);if(!r)continue;repaymentsAll.push(r);if(!allRepByLoan[r.loanId])allRepByLoan[r.loanId]=0;allRepByLoan[r.loanId]+=(r.amount||0);}
+  const repaymentsAll=DB.listActive('pbms_loan_repayment_');
+  for(const r of repaymentsAll){if(!r)continue;if(!allRepByLoan[r.loanId])allRepByLoan[r.loanId]=0;allRepByLoan[r.loanId]+=(r.amount||0);}
   const totalOutstanding=Object.values(loans).reduce((s,l)=>s+Math.max(0,(l.principalAmount||0)-(allRepByLoan[l.id]||0)),0);
 
   // Build merged chronological entries within the date range
@@ -7763,8 +7891,8 @@ async function downloadMonthlyExcel(){
     dayStats[s.checkInDate].se+=s.shortageExcess||0;
     if((s.collections?.oilAmt||0)>0)dayOil[s.checkInDate]=(dayOil[s.checkInDate]||0)+(s.collections.oilAmt||0);
   }
-  const expKeys=DB.listKeys('pbms_expense_');const dayExp={};
-  for(const k of expKeys){const e=DB.get(k);if(e&&e.date.startsWith(mStr)){dayExp[e.date]=(dayExp[e.date]||0)+(e.amount||0);}}
+  const expKeys=DB.listActive('pbms_expense_');const dayExp={};
+  for(const e of expKeys){if(e&&e.date.startsWith(mStr)){dayExp[e.date]=(dayExp[e.date]||0)+(e.amount||0);}}
   const settlKeysEx=DB.listKeys('pbms_daily_settlement_');const dayDepEx={};
   for(const k of settlKeysEx){const s=DB.get(k);if(s&&s.date.startsWith(mStr)){dayDepEx[s.date]=(dayDepEx[s.date]||0)+(s.cashDepositToBank||0);}}
   const rows=dailyData.filter(d=>d.totalAmt>0||dayStats[d.date]).map(d=>{
@@ -7806,23 +7934,37 @@ async function loadMonthlyReport(monthStr){
   const[year,month]=monthStr.split('-').map(Number);
   const dailyData=await getSalesForMonth(year,month);
   const sessKeys=DB.listKeys('pbms_session_');
+  // S/E, oil, and discount are all settlement-time figures (they come out
+  // of the cash count, not the fuel dispensed) — keyed by settlement date,
+  // matching getSalesForMonth's cash-collected logic, not check-in date.
   const dayStats={};
-  for(const k of sessKeys){const s=DB.get(k);if(!s||s.status!=='Settled'||!s.checkInDate.startsWith(monthStr))continue;
-    if(!dayStats[s.checkInDate])dayStats[s.checkInDate]={se:0};
-    dayStats[s.checkInDate].se+=s.shortageExcess||0;}
+  for(const k of sessKeys){
+    const s=DB.get(k);
+    if(!s||s.status!=='Settled')continue;
+    const settleDate=s.settledDate||s.checkOutDate||s.checkInDate;
+    if(!settleDate||!settleDate.startsWith(monthStr))continue;
+    if(!dayStats[settleDate])dayStats[settleDate]={se:0};
+    dayStats[settleDate].se+=s.shortageExcess||0;
+  }
   // Fetch deposits from Daily Settlements
   const settlKeys2=DB.listKeys('pbms_daily_settlement_');
   const dayDep={};
   for(const k of settlKeys2){const s=DB.get(k);if(s&&s.date.startsWith(monthStr)){dayDep[s.date]=(dayDep[s.date]||0)+(s.cashDepositToBank||0);}}
-  const expKeys=DB.listKeys('pbms_expense_');
+  const expKeys=DB.listActive('pbms_expense_');
   const dayExp={};
-  for(const k of expKeys){const e=DB.get(k);if(e&&e.date.startsWith(monthStr)){dayExp[e.date]=(dayExp[e.date]||0)+(e.amount||0);}}
+  for(const e of expKeys){if(e&&e.date.startsWith(monthStr)){dayExp[e.date]=(dayExp[e.date]||0)+(e.amount||0);}}
   const dayOil={};const dayDiscount={};
-  for(const k of sessKeys){const s2=DB.get(k);if(!s2||s2.status!=='Settled'||!s2.checkInDate.startsWith(monthStr))continue;
-    if((s2.collections?.oilAmt||0)>0)dayOil[s2.checkInDate]=(dayOil[s2.checkInDate]||0)+(s2.collections.oilAmt||0);
-    if((s2.collections?.discountAmt||0)>0)dayDiscount[s2.checkInDate]=(dayDiscount[s2.checkInDate]||0)+(s2.collections.discountAmt||0);
+  for(const k of sessKeys){
+    const s2=DB.get(k);
+    if(!s2||s2.status!=='Settled')continue;
+    const settleDate2=s2.settledDate||s2.checkOutDate||s2.checkInDate;
+    if(!settleDate2||!settleDate2.startsWith(monthStr))continue;
+    if((s2.collections?.oilAmt||0)>0)dayOil[settleDate2]=(dayOil[settleDate2]||0)+(s2.collections.oilAmt||0);
+    if((s2.collections?.discountAmt||0)>0)dayDiscount[settleDate2]=(dayDiscount[settleDate2]||0)+(s2.collections.discountAmt||0);
   }
   const totalSales=dailyData.reduce((s,d)=>s+d.totalAmt,0);
+  const totalPendingCount=dailyData.reduce((s,d)=>s+(d.pendingCount||0),0);
+  const totalPendingAmt=dailyData.reduce((s,d)=>s+(d.pendingAmt||0),0);
   let totalExp=0;const catTotals={};
   for(const k of expKeys){const e=DB.get(k);if(e&&e.date.startsWith(monthStr)){totalExp+=e.amount||0;catTotals[e.category]=(catTotals[e.category]||0)+(e.amount||0);}}
   const totalByProd={};products.forEach(p=>totalByProd[p.id]=dailyData.reduce((s,d)=>s+(d.byProduct[p.id]||0),0));
@@ -7831,7 +7973,10 @@ async function loadMonthlyReport(monthStr){
   activeRows.forEach(d=>{tCash+=d.cashAmt||0;tUpi+=d.upiAmt||0;tCard+=d.cardAmt||0;tCredit+=d.creditAmt||0;
     tOil+=dayOil[d.date]||0;tDiscount+=dayDiscount[d.date]||0;tSE+=dayStats[d.date]?.se||0;tExp+=dayExp[d.date]||0;});
   el.innerHTML=`<div class="card overflow-hidden mb-5">
-    <div class="px-4 py-3 border-b border-slate-100 font-semibold text-slate-700 text-sm">Daily Sales — ${fmt.monthName(month)} ${year}</div>
+    <div class="px-4 py-3 border-b border-slate-100 font-semibold text-slate-700 text-sm flex items-center gap-2">
+      <span>Daily Sales — ${fmt.monthName(month)} ${year}</span>
+      ${totalPendingCount>0?`<span class="ml-auto text-xs font-normal text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-0.5">⏳ ${totalPendingCount} shift(s) pending settlement this month, ${fmt.currency(totalPendingAmt)} not yet reconciled</span>`:''}
+    </div>
     <div class="overflow-x-auto"><table class="data-table text-sm"><thead><tr>
       <th>Date</th>
       ${products.map(p=>`<th class="text-right">${p.id} (L)</th>`).join('')}
@@ -7840,6 +7985,7 @@ async function loadMonthlyReport(monthStr){
       <th class="text-right">Cash ₹</th><th class="text-right">UPI ₹</th>
       <th class="text-right">Card ₹</th><th class="text-right">Credit ₹</th>
       <th class="text-right">S/E ₹</th><th class="text-right">Exp ₹</th>
+      <th class="text-right">Pending</th>
     </tr></thead><tbody>
     ${dailyData.filter(d=>d.totalAmt>0||dayStats[d.date]).map(d=>{
       const se=dayStats[d.date]?.se||0;const exp=dayExp[d.date]||0;
@@ -7856,6 +8002,7 @@ async function loadMonthlyReport(monthStr){
         <td class="text-right font-mono">${fmt.currency(d.creditAmt)}</td>
         <td class="text-right font-mono font-semibold ${se<0?'text-red-600':se>0?'text-green-700':''}">${se!==0?(se>0?'+':'')+fmt.currency(Math.abs(se)):'—'}</td>
         <td class="text-right font-mono">${exp>0?fmt.currency(exp):'—'}</td>
+        <td class="text-right font-mono ${(d.pendingCount||0)>0?'text-amber-700 font-semibold':'text-slate-300'}">${(d.pendingCount||0)>0?`${d.pendingCount} · ${fmt.currency(d.pendingAmt)}`:'—'}</td>
       </tr>`;
     }).join('')}
     <tr class="bg-slate-100 font-bold border-t-2 border-slate-300">
@@ -7868,6 +8015,7 @@ async function loadMonthlyReport(monthStr){
       <td class="text-right font-mono">${fmt.currency(tCard)}</td><td class="text-right font-mono">${fmt.currency(tCredit)}</td>
       <td class="text-right font-mono font-semibold ${tSE<0?'text-red-600':tSE>0?'text-green-700':''}">${tSE!==0?(tSE>0?'+':'')+fmt.currency(Math.abs(tSE)):'—'}</td>
       <td class="text-right font-mono">${fmt.currency(tExp)}</td>
+      <td class="text-right font-mono ${totalPendingCount>0?'text-amber-700 font-semibold':'text-slate-300'}">${totalPendingCount>0?`${totalPendingCount} · ${fmt.currency(totalPendingAmt)}`:'—'}</td>
     </tr></tbody></table></div>
   </div>`;
   // Cache the rendered output to avoid full re-scan next time
@@ -7884,8 +8032,7 @@ async function renderCreditTransactionsTab(el){
   if(!APP.tabs.crFrom){const y=now.getFullYear(),m=String(now.getMonth()+1).padStart(2,'0');APP.tabs.crFrom=`${y}-${m}-01`;APP.tabs.crTo=today;}
   APP.tabs.crView=APP.tabs.crView||'ledger';
 
-  const custKeys=DB.listKeys('pbms_customer_');
-  const customers=[];for(const k of custKeys){const c=DB.get(k);if(c)customers.push(c);}
+  const customers=DB.listActive('pbms_customer_');
   customers.sort((a,b)=>a.name.localeCompare(b.name));
 
   el.innerHTML=`<div class="flex flex-wrap items-end gap-3 mb-5 no-print">
@@ -7941,9 +8088,8 @@ async function applyCreditsFilter(){
 }
 
 async function buildCreditLedger(custId,from,to){
-  const custKeys=DB.listKeys('pbms_customer_');
   const customers={};
-  for(const k of custKeys){const c=DB.get(k);if(c)customers[c.id]=c;}
+  for(const c of DB.listActive('pbms_customer_')){if(c)customers[c.id]=c;}
   const entries=[];
   const saleKeys=DB.listKeys('pbms_credit_sale_');
   for(const k of saleKeys){
@@ -8186,11 +8332,10 @@ async function loadProfitReport(){
 
   // Avg purchase rate per product for the whole period (weighted)
   const avgPurRate={};
-  const purKeys=DB.listKeys('pbms_purchase_');
+  const purKeys=DB.listActive('pbms_purchase_');
   for(const pid of products.map(p=>p.id)){
     let totQty=0,totAmt=0;
-    for(const k of purKeys){
-      const p=DB.get(k);
+    for(const p of purKeys){
       if(!p||p.product!==pid||p.date<periodFrom||p.date>periodTo)continue;
       totQty+=p.quantity||0;totAmt+=p.invoiceAmount||0;
     }
@@ -8209,10 +8354,9 @@ async function loadProfitReport(){
 
   // Section B — profit rows
   const sessKeys=DB.listKeys('pbms_session_');
-  const expKeys2=DB.listKeys('pbms_expense_');
-  const allSessions=[],allExps=[];
+  const allExps=DB.listActive('pbms_expense_');
+  const allSessions=[];
   for(const k of sessKeys){const s=DB.get(k);if(s)allSessions.push(s);}
-  for(const k of expKeys2){const e=DB.get(k);if(e)allExps.push(e);}
 
   const rows=await Promise.all(dateRanges.map(async({label,from,to,key})=>{
     const sessForRange=allSessions.filter(s=>{
@@ -8437,6 +8581,21 @@ async function loadSettingsTab(tab){
   const settings=APP.settings||{};
   if(tab==='station'){
     el.innerHTML=`<div class="card p-6 max-w-lg">
+      <h2 class="font-bold text-slate-700 mb-1">🖼 Company Logo</h2>
+      <p class="text-xs text-slate-500 mb-3">Shown on invoices and as a faint watermark on every PDF/print download.</p>
+      <div class="flex items-center gap-4 mb-6 pb-5 border-b border-slate-100">
+        <div class="w-20 h-20 rounded-lg border border-slate-200 flex items-center justify-center bg-slate-50 overflow-hidden shrink-0">
+          ${settings.logoBase64?`<img id="st-logo-preview" src="${settings.logoBase64}" class="max-w-full max-h-full object-contain">`:`<span id="st-logo-preview" class="text-slate-300 text-3xl">🏢</span>`}
+        </div>
+        <div class="flex-1">
+          <input type="file" id="st-logo-file" accept="image/png,image/jpeg,image/webp" class="hidden" onchange="handleLogoUpload(event)">
+          <div class="flex gap-2">
+            <button onclick="document.getElementById('st-logo-file').click()" class="btn btn-sm btn-ghost">${settings.logoBase64?'Change Logo':'Upload Logo'}</button>
+            ${settings.logoBase64?`<button onclick="removeLogo()" class="btn btn-sm btn-red-sm">Remove</button>`:''}
+          </div>
+          <p class="text-xs text-slate-400 mt-1.5">PNG or JPG, resized automatically. Square logos with a transparent background work best.</p>
+        </div>
+      </div>
       <h2 class="font-bold text-slate-700 mb-4">Station Information</h2>
       <div class="space-y-4">
         <div><label class="form-label">Station Name *</label><input type="text" id="st-name" class="form-input" value="${settings.stationName||''}" placeholder="Ravi Petroleum"></div>
@@ -8760,6 +8919,77 @@ function classifyFuelType(productId,settings){
   return inferFuelType(productId,p?.name);
 }
 
+// Resize any uploaded logo down to a sane max dimension before storing —
+// phone camera photos of a signboard can be 4-8MB; nobody needs that
+// fidelity for a small letterhead/watermark image, and storing it at full
+// size would needlessly bloat every future backup export.
+function resizeImageFile(file,maxDim){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onerror=()=>reject(new Error('Could not read file'));
+    reader.onload=(e)=>{
+      const img=new Image();
+      img.onerror=()=>reject(new Error('Not a valid image'));
+      img.onload=()=>{
+        let{width:w,height:h}=img;
+        if(w>maxDim||h>maxDim){
+          if(w>h){h=Math.round(h*(maxDim/w));w=maxDim;}
+          else{w=Math.round(w*(maxDim/h));h=maxDim;}
+        }
+        const canvas=document.createElement('canvas');
+        canvas.width=w;canvas.height=h;
+        canvas.getContext('2d').drawImage(img,0,0,w,h);
+        resolve(canvas.toDataURL('image/png'));
+      };
+      img.src=e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleLogoUpload(event){
+  const file=event.target.files[0];
+  if(!file)return;
+  if(!file.type.startsWith('image/')){toast('Please choose an image file','error');return;}
+  if(file.size>8*1024*1024){toast('Image is too large (max 8MB)','error');return;}
+  toast('Processing logo…','info');
+  try{
+    const dataUrl=await resizeImageFile(file,400);
+    const settings={...(APP.settings||{}),logoBase64:dataUrl};
+    DB.set('pbms_settings',settings);APP.settings=settings;
+    renderPrintWatermark();
+    updateTopbar(settings);
+    await Audit.log('settings_updated','station',settings.stationId,{field:'logo'});
+    toast('Logo saved','success');
+    await loadSettingsTab('station');
+  }catch(err){
+    toast('Could not process that image: '+(err.message||'unknown error'),'error');
+  }
+  event.target.value='';
+}
+
+async function removeLogo(){
+  const settings={...(APP.settings||{})};
+  delete settings.logoBase64;
+  DB.set('pbms_settings',settings);APP.settings=settings;
+  renderPrintWatermark();
+  updateTopbar(settings);
+  await Audit.log('settings_updated','station',settings.stationId,{field:'logo_removed'});
+  toast('Logo removed','success');
+  await loadSettingsTab('station');
+}
+
+// Keeps the print-only watermark (see #print-watermark in the page shell)
+// in sync with the current logo — called at boot and whenever the logo
+// changes, so every window.print() report/receipt picks it up automatically
+// without each report needing to know the logo exists.
+function renderPrintWatermark(){
+  const el=document.getElementById('print-watermark');
+  if(!el)return;
+  const logo=APP.settings?.logoBase64;
+  el.innerHTML=logo?`<img src="${logo}" alt="">`:'';
+}
+
 async function showProductModal(idx){
   const settings=APP.settings||{};
   const p=idx!=null?settings.products[idx]:null;
@@ -8970,18 +9200,26 @@ async function exportData(){
   // list of data types, so nothing can ever be silently left out of a backup.
   const records={};
   for(const[k,v]of DB._cache.entries()){if(v!=null)records[k]=v;}
+  // The Audit Trail lives in its own IndexedDB store and is deliberately
+  // never loaded into DB._cache (kept off the in-memory cache so boot time
+  // and RAM stay flat no matter how many years of history pile up) — which
+  // means the loop above never sees it. Pull it explicitly so "backup
+  // everything" is actually true, not "everything except the audit trail."
+  const auditLog=await dbGetAll('auditLogs');
   const backup={
     __nexbunk_backup__:true,
-    version:1,
+    version:2,
     exportedAt:new Date().toISOString(),
     recordCount:Object.keys(records).length,
-    data:records
+    data:records,
+    auditLogCount:auditLog.length,
+    auditLog
   };
   const blob=new Blob([JSON.stringify(backup,null,2)],{type:'application/json'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);
   a.download=`NexBunk_Backup_${fmt.today()}.json`;a.click();URL.revokeObjectURL(a.href);
   DB.set('pbms_last_backup',{timestamp:new Date().toISOString()});
-  toast(`Backup exported — ${backup.recordCount} records`,'success');
+  toast(`Backup exported — ${backup.recordCount} records + ${auditLog.length} audit entries`,'success');
 }
 
 // ── Backup validation & sanitization (Priority 4.3) ──────────────────────────
@@ -8990,20 +9228,23 @@ async function exportData(){
 function validateAndSanitizeBackup(records){
   if(!records||typeof records!=='object')throw new Error('Backup is not a valid object');
   if(!records.pbms_settings)throw new Error('Missing station settings — not a valid NexBunk backup');
+  // Exact-match keys that aren't prefix-based (single kvstore records rather
+  // than per-record collections).
+  const allowedExactKeys=new Set(['pbms_settings','pbms_bank_balance','pbms_bank_opening_balance',
+    'pbms_last_backup','auditArchiveAnchor']);
   const allowedPrefixes=[
-    'pbms_settings','pbms_staff_','pbms_session_','pbms_credit_sale_',
+    'pbms_staff_','pbms_session_','pbms_credit_sale_',
     'pbms_payment_','pbms_expense_','pbms_purchase_','pbms_loan_',
     'pbms_loan_repayment_','pbms_customer_','pbms_dip_',
-    'pbms_bank_balance','pbms_bank_opening_balance',
     'pbms_daily_settlement_','pbms_opening_stock_','pbms_aggregate_',
     'pbms_incentive_due_','pbms_oil_purchase_','pbms_attend_',
-    'pbms_last_backup','pbms_audit_',
+    'pbms_audit_',
     // Shop Billing & Inventory module (retail/GST invoicing, added later —
     // must stay in sync with shopProductKey/shopPartyKey/shopSaleKey/shopPurchaseKey)
     'shop_product_','shop_party_','shop_sale_','shop_purchase_'
   ];
   for(const key of Object.keys(records)){
-    const valid=allowedPrefixes.some(prefix=>key===prefix||key.startsWith(prefix));
+    const valid=allowedExactKeys.has(key)||allowedPrefixes.some(prefix=>key.startsWith(prefix));
     if(!valid)throw new Error(`Unrecognised record key: "${key}" — file may be corrupted or from a different app`);
   }
   // Recursively sanitize all strings to prevent stored XSS
@@ -9033,14 +9274,31 @@ async function importData(input){
       // Validate structure and sanitize all strings before touching the DB
       const records=validateAndSanitizeBackup(rawRecords);
       const count=Object.keys(records).length;
+      const auditLogIncoming=Array.isArray(raw?.auditLog)?raw.auditLog:[];
       showConfirm('Restore Backup',
-        `This will replace ALL current data with the ${count} record(s) in this backup. Any current data not present in the backup will be removed, so the app matches the backup exactly. Continue?`,
+        `This will replace ALL current data with the ${count} record(s) in this backup. Any current data not present in the backup will be removed, so the app matches the backup exactly.${auditLogIncoming.length?` The Audit Trail's ${auditLogIncoming.length} entries will be merged in (existing audit history is never deleted, even by a restore).`:''} Continue?`,
         async()=>{
           // Clear every existing app record first so the restore has zero leftover/mixed data
           for(const k of DB.listKeys(''))DB.del(k);
           for(const[k,v]of Object.entries(records)){if(v!=null)DB.set(k,v);}
           await DB.flush();
+          // Merge the Audit Trail back in — add-only. A restore must never be
+          // able to erase audit entries that already exist on this device
+          // (e.g. logged after this backup was taken); that would let someone
+          // launder recent activity by "restoring" an older backup. Existing
+          // entries are left untouched; only entries missing by id are added.
+          if(auditLogIncoming.length){
+            const existingIds=new Set((await dbGetAll('auditLogs')).map(r=>r._k));
+            let added=0;
+            for(const rec of auditLogIncoming){
+              if(!rec||!rec._k||existingIds.has(rec._k))continue;
+              try{await dbAdd('auditLogs',rec);added++;}catch(err){console.warn('[NexBunk] Skipped duplicate/invalid audit record during restore:',err);}
+            }
+            console.log(`[NexBunk] Audit Trail restore: ${added} new entr${added===1?'y':'ies'} merged, ${auditLogIncoming.length-added} already present.`);
+          }
           APP.settings=DB.get('pbms_settings');
+          renderPrintWatermark();
+          updateTopbar(APP.settings);
           toast(`Backup restored — ${count} record(s)`,'success');await navigate('shift');
         },'Restore','bg-blue-600 hover:bg-blue-700');
     }catch(err){toast('Invalid backup file: '+(err.message||'unknown error'),'error');}
@@ -9052,6 +9310,8 @@ async function reloadDemoDataInApp(){
   requirePIN('Reloading demo data will overwrite all current records',()=>{
   showConfirm('Reload Demo Data','This will overwrite ALL current data with demo data.',async()=>{
     await seedDemoData();APP.settings=DB.get('pbms_settings');
+    renderPrintWatermark();
+    updateTopbar(APP.settings);
     toast('Demo data loaded','success');await navigate('shift');
   },'Reload','bg-blue-600 hover:bg-blue-700');
   });
@@ -9484,7 +9744,22 @@ function updateTopbar(s){
   if(!s)return;
   const sb=document.getElementById('sb-station');if(sb)sb.textContent=s.stationName||'NexBunk';
   const loc=document.getElementById('sb-loc');if(loc)loc.textContent=[s.omcName,s.omcTerminal].filter(Boolean).join(' · ')||s.location||'';
-  const sba=document.getElementById('sb-avatar');if(sba)sba.textContent=getInitials(s.stationName||'N');
+  // Logo replaces the initials avatar next to the station name once one is
+  // uploaded (Settings > Station). Switches the container from a circular
+  // gold badge to a rounded-square white tile so a non-square or
+  // transparent-background logo still reads clearly against the dark
+  // sidebar, instead of being cropped into a circle.
+  const wrap=document.getElementById('sb-avatar-wrap');
+  if(wrap){
+    if(s.logoBase64){
+      wrap.className='w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 bg-white p-1';
+      wrap.innerHTML=`<img src="${s.logoBase64}" alt="" class="w-full h-full object-contain">`;
+    }else{
+      wrap.className='w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0';
+      wrap.style.background='var(--gold)';
+      wrap.innerHTML=`<span id="sb-avatar" class="text-white font-bold text-sm">${getInitials(s.stationName||'N')}</span>`;
+    }
+  }
   const mts=document.getElementById('mt-station');if(mts)mts.textContent=s.stationName||'NexBunk';
   const mta=document.getElementById('mt-avatar');if(mta)mta.textContent=getInitials(s.stationName||'N');
 }
@@ -9590,6 +9865,7 @@ async function loadDemoData(){
   try{
     await seedDemoData();
     APP.settings=DB.get('pbms_settings');
+    renderPrintWatermark();
     APP.stationId=APP.settings?.stationId||'local';
     document.getElementById('wizard-overlay')?.classList.add('hidden');
     document.getElementById('auth-overlay')?.classList.add('hidden');
@@ -9625,6 +9901,8 @@ async function doImportBackup(){
       for(const[k,v]of Object.entries(records)){if(v!=null)DB.set(k,v);}
       await DB.flush();
       APP.settings=DB.get('pbms_settings');
+      renderPrintWatermark();
+      updateTopbar(APP.settings);
       APP.stationId=APP.settings.stationId||'local';
       document.getElementById('wizard-overlay').classList.add('hidden');
       document.getElementById('auth-overlay')?.classList.add('hidden');
@@ -9769,6 +10047,7 @@ async function bootApp(){
       }
       APP.settings=settings;
       APP.stationId=settings.stationId||'local';
+      renderPrintWatermark();
       document.getElementById('auth-overlay')?.classList.add('hidden');
       document.body.classList.remove('auth-locked');
       updateTopbar(settings);
@@ -9801,15 +10080,15 @@ function shopPartyKey(id){return `shop_party_${id}`;}
 function shopSaleKey(id){return `shop_sale_${id}`;}
 function shopPurchaseKey(id){return `shop_purchase_${id}`;}
 
-function listShopProducts(){return DB.listKeys('shop_product_').map(k=>DB.get(k)).filter(Boolean).sort((a,b)=>(a.name||'').localeCompare(b.name||''));}
-function listShopParties(kind){return DB.listKeys('shop_party_').map(k=>DB.get(k)).filter(Boolean).filter(p=>!kind||p.kind===kind).sort((a,b)=>(a.name||'').localeCompare(b.name||''));}
-function listShopSales(){return DB.listKeys('shop_sale_').map(k=>DB.get(k)).filter(Boolean).sort((a,b)=>(b.date||'').localeCompare(a.date||''));}
-function listShopPurchases(){return DB.listKeys('shop_purchase_').map(k=>DB.get(k)).filter(Boolean).sort((a,b)=>(b.date||'').localeCompare(a.date||''));}
+function listShopProducts(){return DB.listActive('shop_product_').sort((a,b)=>(a.name||'').localeCompare(b.name||''));}
+function listShopParties(kind){return DB.listActive('shop_party_').filter(p=>!kind||p.kind===kind).sort((a,b)=>(a.name||'').localeCompare(b.name||''));}
+function listShopSales(){return DB.listActive('shop_sale_').sort((a,b)=>(b.date||'').localeCompare(a.date||''));}
+function listShopPurchases(){return DB.listActive('shop_purchase_').sort((a,b)=>(b.date||'').localeCompare(a.date||''));}
 
-function getShopProduct(id){return DB.get(shopProductKey(id));}
-function getShopParty(id){return DB.get(shopPartyKey(id));}
-function getShopSale(id){return DB.get(shopSaleKey(id));}
-function getShopPurchase(id){return DB.get(shopPurchaseKey(id));}
+function getShopProduct(id){return DB.getActive(shopProductKey(id));}
+function getShopParty(id){return DB.getActive(shopPartyKey(id));}
+function getShopSale(id){return DB.getActive(shopSaleKey(id));}
+function getShopPurchase(id){return DB.getActive(shopPurchaseKey(id));}
 
 // ====================================================
 // PAGE: SHOP — merged Shop Inventory / Billing / Shop Purchases / Billing
@@ -10065,11 +10344,14 @@ function saveShopProduct(id){
   closeModal();toast(id?'Product updated':'Product added');
   navigate('shopinventory');
 }
-function deleteShopProduct(id){
+async function deleteShopProduct(id){
   const used=listShopSales().some(s=>(s.items||[]).some(it=>it.productId===id))||listShopPurchases().some(pu=>(pu.items||[]).some(it=>it.productId===id));
   if(used){toast('Cannot delete — product is used in sales/purchase records','error');return;}
-  showConfirm('Delete product?','This permanently removes this product from Shop Inventory.',()=>{
-    DB.del(shopProductKey(id));toast('Product deleted');navigate('shopinventory');
+  showConfirm('Delete product?','This permanently removes this product from Shop Inventory.',async()=>{
+    const rec=DB.get(shopProductKey(id));
+    if(rec)DB.set(shopProductKey(id),{...rec,deleted:true,deletedAt:new Date().toISOString(),deletedBy:APP.userEmail||'Manager'});
+    await Audit.log('shop_product_deleted','shop_product',id,{name:rec?.name});
+    toast('Product deleted');navigate('shopinventory');
   });
 }
 
@@ -10178,11 +10460,14 @@ function openShopPartyLedgerModal(id,kind){
     }).join('')):`<div class="p-6 text-center text-slate-400 text-sm">No billing history yet</div>`}
   </div>`);
 }
-function deleteShopParty(kind,id){
+async function deleteShopParty(kind,id){
   const used=kind==='customer'?listShopSales().some(s=>s.partyId===id):listShopPurchases().some(p=>p.partyId===id);
   if(used){toast('Cannot delete — party has billing history','error');return;}
-  showConfirm('Delete?','This permanently removes this party.',()=>{
-    DB.del(shopPartyKey(id));toast('Deleted');navigate('shopparties');
+  showConfirm('Delete?','This permanently removes this party.',async()=>{
+    const rec=DB.get(shopPartyKey(id));
+    if(rec)DB.set(shopPartyKey(id),{...rec,deleted:true,deletedAt:new Date().toISOString(),deletedBy:APP.userEmail||'Manager'});
+    await Audit.log('shop_party_deleted','shop_party',id,{name:rec?.name,kind});
+    toast('Deleted');navigate('shopparties');
   });
 }
 
@@ -10429,12 +10714,14 @@ function saveShopSale(id){
     const updated={...existing,date,partyId,taxType,items,notes,...totals};
     DB.set(shopSaleKey(id),updated);
     applyShopStockDelta(items,-1);
+    Audit.log('shop_sale_edited','shop_sale',id,{invoiceNo:existing.invoiceNo,before:{total:existing.total},after:{total:totals.total}});
     toast('Invoice updated');
   }else{
     const newSale={id:cryptoId(),invoiceNo:nextShopInvoiceNo(),date,partyId,taxType,notes,items,payments:autoPayment,...totals,createdAt:new Date().toISOString()};
     DB.set(shopSaleKey(newSale.id),newSale);
     applyShopStockDelta(items,-1);
     bumpShopInvoiceNo();
+    Audit.log('shop_sale_added','shop_sale',newSale.id,{invoiceNo:newSale.invoiceNo,total:newSale.total,payMode});
     toast('Invoice created');
   }
   APP._billingView=null;APP._billForm=null;
@@ -10515,10 +10802,11 @@ function saveShopPayment(saleId){
   APP._billingView={mode:'view',id:saleId};navigate('billing');
 }
 function deleteShopSale(id){
-  showConfirm('Delete invoice?','This permanently deletes this invoice and reverses its stock effect.',()=>{
+  showConfirm('Delete invoice?','This permanently deletes this invoice and reverses its stock effect.',async()=>{
     const sale=getShopSale(id);
     applyShopStockDelta(sale.items,+1);
-    DB.del(shopSaleKey(id));
+    DB.set(shopSaleKey(id),{...sale,deleted:true,deletedAt:new Date().toISOString(),deletedBy:APP.userEmail||'Manager'});
+    await Audit.log('shop_sale_deleted','shop_sale',id,{invoiceNo:sale.invoiceNo,total:sale.total});
     toast('Invoice deleted');
     APP._billingView=null;navigate('billing');
   },'Delete');
@@ -10554,8 +10842,12 @@ function downloadShopInvoicePDF(saleId){
     *{box-sizing:border-box}
     body{font-family:Arial,Helvetica,sans-serif;font-size:11.5px;color:#111;margin:0}
     .head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #111;padding-bottom:10px;margin-bottom:10px}
+    .head-biz{display:flex;gap:12px;align-items:flex-start}
+    .head-logo{width:56px;height:56px;object-fit:contain;flex-shrink:0}
     .biz-name{font-size:19px;font-weight:700}
     .muted{color:#555}
+    .watermark{position:fixed;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;z-index:-1;pointer-events:none}
+    .watermark img{width:45%;max-width:320px;height:auto;opacity:.07}
     .title{text-align:center;font-size:15px;font-weight:700;letter-spacing:1px;margin:8px 0 12px}
     .grid2{display:flex;justify-content:space-between;gap:20px;margin-bottom:12px}
     .box{flex:1;border:1px solid #ccc;border-radius:4px;padding:8px 10px}
@@ -10576,14 +10868,18 @@ function downloadShopInvoicePDF(saleId){
     .no-print{margin-bottom:10px}
     @media print{.no-print{display:none}}
   </style></head><body>
+    ${settings.logoBase64?`<div class="watermark"><img src="${settings.logoBase64}" alt=""></div>`:''}
     <div class="no-print"><button onclick="window.print()">🖨 Print / Save as PDF</button></div>
     <div class="head">
-      <div>
-        <div class="biz-name">${esc(settings.stationName||'NexBunk')}</div>
-        ${settings.address?`<div class="muted">${esc(settings.address)}</div>`:''}
-        <div class="muted">${[settings.location,settings.phone?('Ph: '+settings.phone):''].filter(Boolean).join(' · ')}</div>
-        ${settings.gstin?`<div><b>GSTIN:</b> ${esc(settings.gstin)}</div>`:''}
-        ${settings.licenseNo?`<div class="muted">License No: ${esc(settings.licenseNo)}</div>`:''}
+      <div class="head-biz">
+        ${settings.logoBase64?`<img class="head-logo" src="${settings.logoBase64}" alt="">`:''}
+        <div>
+          <div class="biz-name">${esc(settings.stationName||'NexBunk')}</div>
+          ${settings.address?`<div class="muted">${esc(settings.address)}</div>`:''}
+          <div class="muted">${[settings.location,settings.phone?('Ph: '+settings.phone):''].filter(Boolean).join(' · ')}</div>
+          ${settings.gstin?`<div><b>GSTIN:</b> ${esc(settings.gstin)}</div>`:''}
+          ${settings.licenseNo?`<div class="muted">License No: ${esc(settings.licenseNo)}</div>`:''}
+        </div>
       </div>
       <div style="text-align:right">
         <div class="muted">Invoice No.</div>
@@ -10903,6 +11199,7 @@ function saveShopPurchase(){
   const payments=paidAmt>0?[{id:cryptoId(),amount:paidAmt,date:payDate,mode:payMode,createdAt:new Date().toISOString()}]:[];
   const bill={id:cryptoId(),ref:nextShopPurchaseRef(),date,partyId,items,notes,payments,...totals,createdAt:new Date().toISOString()};
   DB.set(shopPurchaseKey(bill.id),bill);
+  Audit.log('shop_purchase_added','shop_purchase',bill.id,{ref:bill.ref,total:bill.total});
   applyShopStockDelta(items,+1); // purchases increase stock
   // purchase price/unit updates the product's cost, selling price/unit updates its MRP/rate
   items.forEach(it=>{
@@ -10944,10 +11241,11 @@ function saveShopPurchasePayment(id){
   navigate('shoppurchases');
 }
 function deleteShopPurchase(id){
-  showConfirm('Delete purchase bill?','This reverses its stock effect and deletes the bill.',()=>{
+  showConfirm('Delete purchase bill?','This reverses its stock effect and deletes the bill.',async()=>{
     const p=getShopPurchase(id);
     applyShopStockDelta(p.items,-1);
-    DB.del(shopPurchaseKey(id));
+    DB.set(shopPurchaseKey(id),{...p,deleted:true,deletedAt:new Date().toISOString(),deletedBy:APP.userEmail||'Manager'});
+    await Audit.log('shop_purchase_deleted','shop_purchase',id,{ref:p.ref,total:p.total});
     toast('Purchase deleted');
     navigate('shoppurchases');
   },'Delete');
