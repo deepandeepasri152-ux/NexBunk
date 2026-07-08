@@ -1961,7 +1961,7 @@ function renderSettlementCard(sess,settings,idx){
             ${sess.employeeName}<span class="badge badge-amber">🕓 Awaiting Settlement</span>
             ${(sess.editHistory||[]).length>0?`<button onclick="showEditHistory('${sess.id}')" class="badge text-amber-700 bg-amber-100 text-xs hover:bg-amber-200 cursor-pointer border-0">✏ Edited (${sess.editHistory.length})</button>`:''}
           </div>
-          <div class="text-xs text-slate-500">${nozzles.map(n=>n.nozzleName).join(', ')} · ${fmt.date(sess.checkInDate)} ${sess.checkInTime||''} → ${sess.checkOutTime||''} · Total Sale: <span class="font-semibold text-slate-700">${fmt.currency(calcSales)}</span></div>
+          <div class="text-xs text-slate-500">${nozzles.map(n=>n.nozzleName).join(', ')} · ${fmt.date(sess.checkInDate)} ${sess.checkInTime||''} → ${sess.checkOutTime||''} · Total Sale: <span class="font-semibold text-slate-700">${fmt.currency(calcSales+(c.oilAmt||0))}</span></div>
         </div>
       </div>
       <button onclick="showSingleSessionEdit('${sess.id}','pending')" class="btn btn-ghost btn-sm text-xs">✏ Edit Readings</button>
@@ -1970,7 +1970,7 @@ function renderSettlementCard(sess,settings,idx){
       <div class="bg-slate-50 rounded-lg p-3 mb-4 text-sm space-y-1">${nozzleSummary}</div>
       <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 text-sm session-coll-grid">
         <div><label class="form-label text-xs">Calc. Sales ₹ 🔵</label>
-          <input type="text" id="calc-${sess.id}" class="auto-field form-input text-right font-mono text-sm" readonly value="${calcSales?fmt.num(calcSales):''}" data-val="${calcSales}" data-paise="${sess.calcSalesPaise||0}"></div>
+          <input type="text" id="calc-${sess.id}" class="auto-field form-input text-right font-mono text-sm" readonly value="${calcSales?fmt.num(calcSales):''}" data-val="${calcSales}" data-paise="${sess.calcSalesPaise||0}" data-fuelpaise="${sess.calcSalesPaise||0}"></div>
         <div><label class="form-label text-xs">Oil / Lube ₹</label>
           <input type="number" id="coll-${sess.id}-oil" class="form-input text-right font-mono text-sm" step="0.01" min="0" value="${c.oilAmt||''}" placeholder="0" oninput="calcSE('${sess.id}')"></div>
         <div><label class="form-label text-xs">Cash ₹</label>
@@ -2060,7 +2060,7 @@ function renderSessionCard(sess,settings,idx){
           <tbody>${nozzleRows}</tbody>
         </table>
       </div>
-      <input type="hidden" id="calc-${sess.id}" value="${calcSales}" data-val="${calcSales}" data-paise="${sess.calcSalesPaise||0}">
+      <input type="hidden" id="calc-${sess.id}" value="${calcSales}" data-val="${calcSales}" data-paise="${sess.calcSalesPaise||0}" data-fuelpaise="${sess.calcSalesPaise||0}">
     </div>
     <div class="flex items-center justify-between px-4 sm:px-5 py-3 border-t border-slate-100 bg-slate-50 no-print flex-wrap gap-2">
       <span id="hint-${sess.id}" class="text-xs text-slate-500">${nozzles.some(n=>n.hasReadingError)?'⚠ Fix the meter reading error above before handover':nozzles.every(n=>(n.closingReading||0)>0)?'All readings complete — ready to hand over':'Enter closing readings to hand over'}</span>
@@ -2126,7 +2126,7 @@ function calcSessionTotals(sessId){
   });
   const calcSales=Money.fromPaise(calcPaise);
   const calcEl=document.getElementById(`calc-${sessId}`);
-  if(calcEl){calcEl.value=calcSales>0?fmt.num(calcSales):'';calcEl.dataset.val=calcSales;calcEl.dataset.paise=calcPaise;}
+  if(calcEl){calcEl.value=calcSales>0?fmt.num(calcSales):'';calcEl.dataset.val=calcSales;calcEl.dataset.paise=calcPaise;calcEl.dataset.fuelpaise=calcPaise;}
   calcSE(sessId,calcPaise);
   const nozzleRows=card.querySelectorAll('[data-nozzle]');
   const allDone=Array.from(nozzleRows).every(row=>{
@@ -2159,14 +2159,20 @@ function updateStatusBadge(sessId,allDone){
 
 function calcSE(sessId,calcPaiseOverride){
   const calcEl=document.getElementById(`calc-${sessId}`);
-  // Accept either paise integer (new) or float rupees (legacy fallback)
-  let calcPaise;
+  // Accept either paise integer (new) or float rupees (legacy fallback).
+  // fuelPaise is the pure fuel amount (from nozzle readings) — it never
+  // includes oil. When an override is passed (nozzle readings just changed
+  // on the Active card), that override IS the fresh fuel figure. Otherwise
+  // (oil/cash/etc. input on the Pending Settlements card), read the fuel
+  // figure from data-fuelpaise, which is set once at render/handover time
+  // and never overwritten by oil/collection edits.
+  let fuelPaise;
   if(typeof calcPaiseOverride==='number'&&calcPaiseOverride===Math.floor(calcPaiseOverride)&&Math.abs(calcPaiseOverride)>100){
-    calcPaise=calcPaiseOverride; // already in paise
+    fuelPaise=calcPaiseOverride; // already in paise
   } else if(typeof calcPaiseOverride==='number'){
-    calcPaise=Money.toPaise(calcPaiseOverride);
+    fuelPaise=Money.toPaise(calcPaiseOverride);
   } else {
-    calcPaise=parseInt(calcEl?.dataset.paise||0)||Money.toPaise(parseFloat(calcEl?.dataset.val||0));
+    fuelPaise=parseInt(calcEl?.dataset.fuelpaise||0)||parseInt(calcEl?.dataset.paise||0)||Money.toPaise(parseFloat(calcEl?.dataset.val||0));
   }
   const cashP   =Money.toPaise(document.getElementById(`coll-${sessId}-cash`)?.value||0);
   const cardP   =Money.toPaise(document.getElementById(`coll-${sessId}-card`)?.value||0);
@@ -2174,9 +2180,20 @@ function calcSE(sessId,calcPaiseOverride){
   const creditP =Money.toPaise(document.getElementById(`coll-${sessId}-credit`)?.value||0);
   const oilP    =Money.toPaise(document.getElementById(`coll-${sessId}-oil`)?.value||0);
   const discP   =Money.toPaise(document.getElementById(`coll-${sessId}-discount`)?.value||0);
-  // SE (paise) = Collections − (Fuel Sales − Discount + Oil)
+  // Calc. Sales (displayed) = Fuel Sales + Oil/Lube Sales — combined here so
+  // the field the person actually looks at already reflects the full sale,
+  // not fuel alone. data-fuelpaise (set above / on the field itself) stays
+  // the pure-fuel source of truth for persistence — never overwritten below.
+  const calcPaise=Money.add(fuelPaise,oilP);
+  if(calcEl){
+    const calcSalesDisplay=Money.fromPaise(calcPaise);
+    calcEl.value=calcSalesDisplay>0?fmt.num(calcSalesDisplay):'';
+    calcEl.dataset.val=calcSalesDisplay;
+    calcEl.dataset.paise=calcPaise;
+  }
+  // SE (paise) = Collections − (Calc. Sales [Fuel+Oil] − Discount)
   const collPaise=Money.add(cashP,cardP,upiP,creditP);
-  const duePaise =Money.add(calcPaise,oilP,-discP); // (calcSales + oil) - discount
+  const duePaise =Money.add(calcPaise,-discP); // (fuel + oil) - discount
   const sePaise  =Money.sub(collPaise,duePaise);
   const se=Money.fromPaise(sePaise);
   const seEl=document.getElementById(`se-${sessId}`);
@@ -2221,7 +2238,12 @@ async function saveSessionInputs(sessId){
     collPaise[`${f}Paise`]=Money.toPaise(val);
   });
   sess.collections={...collRupees,...collPaise};
-  const calcPaise=parseInt(document.getElementById(`calc-${sessId}`)?.dataset.paise||0)||Money.toPaise(parseFloat(document.getElementById(`calc-${sessId}`)?.dataset.val||0));
+  // calc-${sessId}'s data-paise now holds the DISPLAYED Calc. Sales value
+  // (Fuel + Oil combined, see calcSE). data-fuelpaise is the stable pure-fuel
+  // figure (from nozzle readings) that must be what's actually persisted as
+  // sess.calcSales — oil belongs only in sess.collections.oilAmt.
+  const calcEl=document.getElementById(`calc-${sessId}`);
+  const calcPaise=parseInt(calcEl?.dataset.fuelpaise||0)||parseInt(calcEl?.dataset.paise||0)||Money.toPaise(parseFloat(calcEl?.dataset.val||0));
   sess.calcSales=Money.fromPaise(calcPaise);
   sess.calcSalesPaise=calcPaise;
   const c=sess.collections;
@@ -3036,7 +3058,7 @@ async function showSingleSessionEdit(sessId,origin='staffreport'){
       </div>
       <div class="grid grid-cols-2 gap-3 mt-3">
         <div><label class="form-label text-xs">Calc. Sales ₹ 🔵</label>
-          <div id="se-calc-sales" class="auto-field form-input text-sm font-mono text-right">${fmt.num(sess.calcSales||0)}</div>
+          <div id="se-calc-sales" class="auto-field form-input text-sm font-mono text-right" data-fuelpaise="${sess.calcSalesPaise||0}">${fmt.num((sess.calcSales||0)+(c.oilAmt||0))}</div>
         </div>
         <div><label class="form-label text-xs">Short/Excess ₹ 🔵</label>
           <div id="se-result" class="${(sess.shortageExcess||0)<0?'form-input bg-red-50 border-red-200 text-red-700':'form-input bg-green-50 border-green-200 text-green-700'} text-sm font-mono font-semibold text-right">${fmt.num(sess.shortageExcess||0)}</div>
@@ -3100,12 +3122,13 @@ function recalcEditNozzle(sessId,nozzleId,opening,rate){
 }
 
 function recalcEditSE(sessId){
-  // Sum all nozzle amounts from auto-fields using paise to avoid float drift
-  let calcPaise=0;
+  // Sum all nozzle amounts from auto-fields using paise to avoid float drift —
+  // this is the pure fuel figure (fuelPaise), never includes oil.
+  let fuelPaise=0;
   document.querySelectorAll('[id^="se-amt-"]').forEach(el=>{
     // dataset.paise set by the edit modal's calcNozzle-equivalent; fall back to float val
     const p=parseInt(el.dataset.paise||0);
-    calcPaise+=p||Money.toPaise(parseFloat(el.dataset.val||el.textContent.replace(/,/g,''))||0);
+    fuelPaise+=p||Money.toPaise(parseFloat(el.dataset.val||el.textContent.replace(/,/g,''))||0);
   });
   const cashP   =Money.toPaise(parseFloat(document.getElementById('se-cash')?.value)||0);
   const upiP    =Money.toPaise(parseFloat(document.getElementById('se-upi')?.value)||0);
@@ -3113,15 +3136,17 @@ function recalcEditSE(sessId){
   const creditP =Money.toPaise(parseFloat(document.getElementById('se-credit')?.value)||0);
   const oilP    =Money.toPaise(parseFloat(document.getElementById('se-oil')?.value)||0);
   const discP   =Money.toPaise(parseFloat(document.getElementById('se-discount')?.value)||0);
-  // SE = (cash+upi+card+credit) − (calcSales − discount + oil)  — all in paise
+  // Calc. Sales (displayed) = Fuel Sales + Oil/Lube Sales
+  const calcPaise=Money.add(fuelPaise,oilP);
+  // SE = (cash+upi+card+credit) − (Calc. Sales [Fuel+Oil] − Discount) — all in paise
   const collPaise=Money.add(cashP,upiP,cardP,creditP);
-  const duePaise =Money.add(calcPaise,oilP,-discP); // (calcSales + oil) - discount
+  const duePaise =Money.add(calcPaise,-discP); // (fuel + oil) - discount
   const sePaise  =Money.sub(collPaise,duePaise);
   const calcSales=Money.fromPaise(calcPaise);
   const se=Money.fromPaise(sePaise);
   const csEl=document.getElementById('se-calc-sales');
   const seEl=document.getElementById('se-result');
-  if(csEl){csEl.textContent=fmt.num(calcSales);csEl.dataset.paise=calcPaise;}
+  if(csEl){csEl.textContent=fmt.num(calcSales);csEl.dataset.paise=calcPaise;csEl.dataset.fuelpaise=fuelPaise;}
   if(seEl){
     seEl.textContent=fmt.num(se);seEl.dataset.paise=sePaise;
     seEl.className=`${se<0?'form-input bg-red-50 border-red-200 text-red-700':'form-input bg-green-50 border-green-200 text-green-700'} text-sm font-mono font-semibold text-right`;
@@ -5081,10 +5106,10 @@ async function loadSettlementForDate(date){
     if(settleDate===date)sessions.push(s);
   }
 
-  const fuelCash   =sessions.reduce((s,x)=>s+(x.collections?.cashAmt||0),0);
-  const fuelUpi    =sessions.reduce((s,x)=>s+(x.collections?.upiAmt||0),0);
-  const fuelCard   =sessions.reduce((s,x)=>s+(x.collections?.cardAmt||0),0);
-  const fuelCredit =sessions.reduce((s,x)=>s+(x.collections?.creditAmt||0),0);
+  const fuelOilCash   =sessions.reduce((s,x)=>s+(x.collections?.cashAmt||0),0);
+  const fuelOilUpi    =sessions.reduce((s,x)=>s+(x.collections?.upiAmt||0),0);
+  const fuelOilCard   =sessions.reduce((s,x)=>s+(x.collections?.cardAmt||0),0);
+  const fuelOilCredit =sessions.reduce((s,x)=>s+(x.collections?.creditAmt||0),0);
 
   // Shop (retail) sales for this date — payment mode chosen at billing time.
   // Cash/UPI/Card sales are paid-in-full and settle same-day; Credit sales
@@ -5113,10 +5138,10 @@ async function loadSettlementForDate(date){
     creditRecoveryCash+=p.amount||0;
   }
 
-  const cashCollection =fuelCash+shopCash+creditRecoveryCash;
-  const upiCollection  =fuelUpi+shopUpi;
-  const cardCollection =fuelCard+shopCard;
-  const creditSales    =fuelCredit+shopCredit;
+  const cashCollection =fuelOilCash+shopCash+creditRecoveryCash;
+  const upiCollection  =fuelOilUpi+shopUpi;
+  const cardCollection =fuelOilCard+shopCard;
+  const creditSales    =fuelOilCredit+shopCredit;
   const totalCollected =cashCollection+upiCollection+cardCollection+creditSales;
 
   // Load existing settlement (if already saved)
@@ -6403,11 +6428,11 @@ function computeDailyReportData(date){
     const ss=DB.get(k);
     if(ss&&ss.status==='Settled'&&(ss.settledDate||ss.checkOutDate||ss.checkInDate)===date)settledSessions.push(ss);
   }
-  let fuelCash=0,fuelUpi=0,fuelCard=0,fuelCredit=0,fuelOil=0,fuelDiscount=0;
+  let fuelOilCash=0,fuelOilUpi=0,fuelOilCard=0,fuelOilCredit=0,fuelOil=0,fuelDiscount=0;
   for(const ss of settledSessions){
     const col=ss.collections||{};
-    fuelCash+=col.cashAmt||0; fuelUpi+=col.upiAmt||0; fuelCard+=col.cardAmt||0;
-    fuelCredit+=col.creditAmt||0; fuelOil+=col.oilAmt||0; fuelDiscount+=col.discountAmt||0;
+    fuelOilCash+=col.cashAmt||0; fuelOilUpi+=col.upiAmt||0; fuelOilCard+=col.cardAmt||0;
+    fuelOilCredit+=col.creditAmt||0; fuelOil+=col.oilAmt||0; fuelDiscount+=col.discountAmt||0;
   }
 
   // Shop (retail) sales for this date — same payment-mode logic already
@@ -6426,7 +6451,7 @@ function computeDailyReportData(date){
     else if(mode==='Card')shopCard+=(sale.payments[0].amount||0);
   }
 
-  const fuelNet=fuelCash+fuelUpi+fuelCard+fuelCredit;
+  const fuelOilNet=fuelOilCash+fuelOilUpi+fuelOilCard+fuelOilCredit;
   const shopNet=shopCash+shopUpi+shopCard+shopCredit;
 
   // ── 2. STOCK & PURCHASES ──
@@ -6495,12 +6520,12 @@ function computeDailyReportData(date){
   for(const k of DB.listKeys('pbms_incentive_due_')){const d=DB.get(k);if(d&&d.date===date)incentiveAll+=(d.amount||0);}
   let purchasePaidTotal=0;
   for(const p of purKeys){if(p&&p.date===date&&p.paymentStatus==='Paid')purchasePaidTotal+=(p.invoiceAmount||0);}
-  const salesNetCollected=fuelCash+fuelUpi+fuelCard+shopCash+shopUpi+shopCard;
+  const salesNetCollected=fuelOilCash+fuelOilUpi+fuelOilCard+shopCash+shopUpi+shopCard;
   const todayCashInAll=salesNetCollected+cpTotal+loanReceivedAll+incentiveAll;
   const todayCashOutAll=purchasePaidTotal+loanRepayTotal+expTotal;
 
   return{date,daySessions,settledSessions,fuelHsd,fuelMs,fuelAmt,pendingSettleCount,pendingSettleAmt,
-    fuelCash,fuelUpi,fuelCard,fuelCredit,fuelOil,fuelDiscount,fuelNet,
+    fuelOilCash,fuelOilUpi,fuelOilCard,fuelOilCredit,fuelOil,fuelDiscount,fuelOilNet,
     shopSalesToday,shopCash,shopUpi,shopCard,shopCredit,shopNet,
     purTotal,purRows,expTotal,expRows,csTotal,csRows,loanRepayTotal,
     bankDeposit,bankWithdraw,cpTotal,stockLevels,stockVarianceRows,stockVarianceFlagCount,stockTolerance,
@@ -6517,7 +6542,7 @@ async function loadDailyReport(){
   const dateLabel=fmt.date(date);
 
   const{daySessions,settledSessions,fuelHsd,fuelMs,fuelAmt,pendingSettleCount,pendingSettleAmt,
-    fuelCash,fuelUpi,fuelCard,fuelCredit,fuelOil,fuelDiscount,fuelNet,
+    fuelOilCash,fuelOilUpi,fuelOilCard,fuelOilCredit,fuelOil,fuelDiscount,fuelOilNet,
     shopSalesToday,shopCash,shopUpi,shopCard,shopCredit,shopNet,
     purTotal,purRows,expTotal,expRows,csTotal,csRows,loanRepayTotal,
     bankDeposit,bankWithdraw,cpTotal,stockLevels,stockVarianceRows,stockVarianceFlagCount,
@@ -6598,11 +6623,15 @@ async function loadDailyReport(){
       <tr class="font-bold bg-slate-50 border-t-2 border-slate-300">
         <td colspan="2">TOTAL</td>
         <td class="text-right font-mono">${fuelOil?fmt.currency(fuelOil):'—'}</td>
-        <td class="text-right font-mono text-green-700">${fmt.currency(fuelCash+shopCash)}</td>
-        <td class="text-right font-mono text-green-700">${fmt.currency(fuelUpi+shopUpi)}</td>
-        <td class="text-right font-mono">${fmt.currency(fuelCard+shopCard)}</td>
-        <td class="text-right font-mono text-amber-600">${fmt.currency(fuelCredit+shopCredit)}</td>
+        <td class="text-right font-mono text-green-700">${fmt.currency(fuelOilCash+shopCash)}</td>
+        <td class="text-right font-mono text-green-700">${fmt.currency(fuelOilUpi+shopUpi)}</td>
+        <td class="text-right font-mono">${fmt.currency(fuelOilCard+shopCard)}</td>
+        <td class="text-right font-mono text-amber-600">${fmt.currency(fuelOilCredit+shopCredit)}</td>
       </tr></tbody></table></div>`}
+    <div class="px-4 py-2 border-t border-teal-100 bg-teal-50/50 flex flex-wrap items-center gap-x-6 gap-y-1 text-xs">
+      <span class="text-teal-800"><b>Fuel + Oil Collected</b> (Cash+UPI+Card+Credit): <span class="font-mono font-semibold">${fmt.currency(fuelOilNet)}</span></span>
+      ${fuelDiscount>0?`<span class="text-amber-700"><b>Discounts Given Today:</b> <span class="font-mono font-semibold">${fmt.currency(fuelDiscount)}</span></span>`:''}
+    </div>
   </div>
 
   <!-- SECTION 2: STOCK & PURCHASES -->
@@ -8364,10 +8393,11 @@ async function loadProfitReport(){
       const settleDate=s.settledDate||s.checkOutDate||s.checkInDate;
       return settleDate>=from&&settleDate<=to;
     });
-    let hsdQty=0,msQty=0,fuelRevenue=0,discountAmt=0,purchaseCost=0;
+    let hsdQty=0,msQty=0,fuelRevenue=0,oilRevenue=0,discountAmt=0,purchaseCost=0;
     const prodQty={};
     for(const s of sessForRange){
       discountAmt+=s.collections?.discountAmt||0;
+      oilRevenue+=s.collections?.oilAmt||0;
       for(const n of s.assignedNozzles||[]){
         const qty=n.netSale||0;
         // Use the actual amount collected at the time of sale (locked-in rate at
@@ -8381,14 +8411,21 @@ async function loadProfitReport(){
         else if(n.product==='MS')msQty+=qty;
       }
     }
+    // Oil/Lube cost of goods — matched against oilRevenue above so Gross Profit
+    // isn't overstated by oil revenue with no corresponding cost. Keyed by
+    // purchase date, same [from,to] window as fuel purchases below.
+    let oilCost=0;
+    for(const p of DB.listActive('pbms_oil_purchase_')){
+      if(!p||!p.date||p.date<from||p.date>to)continue;
+      oilCost+=p.totalCost||0;
+    }
     for(const[pid,qty]of Object.entries(prodQty)){
       // Use THIS period's own average purchase rate so the trend reflects
       // actual price changes month-to-month, not one blended rate smeared
       // across the whole displayed range. Fall back to the full-period
       // average only if this specific period has no logged purchases.
       let totQty=0,totAmt=0;
-      for(const k of purKeys){
-        const p=DB.get(k);
+      for(const p of purKeys){
         if(!p||p.product!==pid||p.date<from||p.date>to)continue;
         totQty+=p.quantity||0;totAmt+=p.invoiceAmount||0;
       }
@@ -8399,17 +8436,18 @@ async function loadProfitReport(){
     const incentiveDues=DB.listKeys('pbms_incentive_due_');
     let incentiveDueAmt=0;
     for(const k of incentiveDues){const d=DB.get(k);if(d&&d.date>=from&&d.date<=to)incentiveDueAmt+=(d.amount||0);}
-    const totalRevenue=fuelRevenue-discountAmt+incentiveDueAmt;
+    purchaseCost+=oilCost;
+    const totalRevenue=fuelRevenue+oilRevenue-discountAmt+incentiveDueAmt;
     const grossProfit=totalRevenue-purchaseCost;
     const expenses=allExps.filter(e=>e.date>=from&&e.date<=to).reduce((s,e)=>s+(e.amount||0),0);
     const netProfit=grossProfit-expenses;
     const netMarginPct=totalRevenue>0?(netProfit/totalRevenue)*100:0;
     const grossMarginPct=totalRevenue>0?(grossProfit/totalRevenue)*100:0;
-    return{label,key,hsdQty,msQty,fuelRevenue,discountAmt,incentiveDueAmt,totalRevenue,purchaseCost,grossProfit,grossMarginPct,expenses,netProfit,netMarginPct};
+    return{label,key,hsdQty,msQty,fuelRevenue,oilRevenue,discountAmt,incentiveDueAmt,totalRevenue,purchaseCost,grossProfit,grossMarginPct,expenses,netProfit,netMarginPct};
   }));
 
   // Totals
-  const tot={hsdQty:0,msQty:0,fuelRevenue:0,discountAmt:0,incentiveDueAmt:0,totalRevenue:0,purchaseCost:0,grossProfit:0,expenses:0,netProfit:0};
+  const tot={hsdQty:0,msQty:0,fuelRevenue:0,oilRevenue:0,discountAmt:0,incentiveDueAmt:0,totalRevenue:0,purchaseCost:0,grossProfit:0,expenses:0,netProfit:0};
   rows.forEach(r=>{for(const k of Object.keys(tot))tot[k]+=r[k]||0;});
   const totNetMargin=tot.totalRevenue>0?(tot.netProfit/tot.totalRevenue)*100:0;
   const totGrossMargin=tot.totalRevenue>0?(tot.grossProfit/tot.totalRevenue)*100:0;
@@ -8476,6 +8514,7 @@ async function loadProfitReport(){
         <th>${view==='monthly'?'Month':'Date'}</th>
         <th class="text-right">HSD (L)</th><th class="text-right">MS (L)</th>
         <th class="text-right">Fuel Rev ₹</th>
+        <th class="text-right">Oil Rev ₹</th>
         <th class="text-right">Discount ₹</th>
         <th class="text-right">Incentive ₹</th>
         <th class="text-right">Net Rev ₹</th>
@@ -8490,6 +8529,7 @@ async function loadProfitReport(){
           <td class="text-right font-mono">${fmt.num(r.hsdQty)}</td>
           <td class="text-right font-mono">${fmt.num(r.msQty)}</td>
           <td class="text-right font-mono">${fmt.currency(r.fuelRevenue)}</td>
+          <td class="text-right font-mono text-amber-700">${r.oilRevenue>0?fmt.currency(r.oilRevenue):'—'}</td>
           <td class="text-right font-mono text-red-500">${r.discountAmt>0?fmt.currency(r.discountAmt):'—'}</td>
           <td class="text-right font-mono text-green-600">${r.incentiveDueAmt>0?fmt.currency(r.incentiveDueAmt):'—'}</td>
           <td class="text-right font-mono font-semibold">${fmt.currency(r.totalRevenue)}</td>
@@ -8506,6 +8546,7 @@ async function loadProfitReport(){
           <td class="text-right font-mono">${fmt.num(tot.hsdQty)}</td>
           <td class="text-right font-mono">${fmt.num(tot.msQty)}</td>
           <td class="text-right font-mono">${fmt.currency(tot.fuelRevenue)}</td>
+          <td class="text-right font-mono text-amber-700">${tot.oilRevenue>0?fmt.currency(tot.oilRevenue):'—'}</td>
           <td class="text-right font-mono text-red-500">${tot.discountAmt>0?fmt.currency(tot.discountAmt):'—'}</td>
           <td class="text-right font-mono text-green-600">${tot.incentiveDueAmt>0?fmt.currency(tot.incentiveDueAmt):'—'}</td>
           <td class="text-right font-mono">${fmt.currency(tot.totalRevenue)}</td>
@@ -8530,6 +8571,7 @@ async function downloadProfitExcel(){
     'HSD (L)':        +r.hsdQty.toFixed(2),
     'MS (L)':         +r.msQty.toFixed(2),
     'Fuel Revenue ₹': +r.fuelRevenue.toFixed(2),
+    'Oil Revenue ₹':  +(r.oilRevenue||0).toFixed(2),
     'Discount ₹':     +(r.discountAmt||0).toFixed(2),
     'Incentive ₹':      +(r.incentiveDueAmt||0).toFixed(2),
     'Net Revenue ₹':  +r.totalRevenue.toFixed(2),
