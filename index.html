@@ -2176,7 +2176,7 @@ function calcSE(sessId,calcPaiseOverride){
   const discP   =Money.toPaise(document.getElementById(`coll-${sessId}-discount`)?.value||0);
   // SE (paise) = Collections − (Fuel Sales − Discount + Oil)
   const collPaise=Money.add(cashP,cardP,upiP,creditP);
-  const duePaise =Money.add(calcPaise,-discP,oilP); // calcSales - discount + oil
+  const duePaise =Money.add(calcPaise,oilP,-discP); // (calcSales + oil) - discount
   const sePaise  =Money.sub(collPaise,duePaise);
   const se=Money.fromPaise(sePaise);
   const seEl=document.getElementById(`se-${sessId}`);
@@ -2227,7 +2227,7 @@ async function saveSessionInputs(sessId){
   const c=sess.collections;
   // SE in paise — integer arithmetic, no float drift
   const collTotalP=Money.add(c.cashPaise,c.cardPaise,c.upiPaise,c.creditPaise);
-  const dueP=Money.add(calcPaise,-c.discountPaise,c.oilPaise);
+  const dueP=Money.add(calcPaise,c.oilPaise,-c.discountPaise); // (calcSales + oil) - discount
   const sePaise=Money.sub(collTotalP,dueP);
   sess.shortageExcess=Money.fromPaise(sePaise);
   sess.shortageExcessPaise=sePaise;
@@ -2445,7 +2445,7 @@ async function showSettleModal(sessId){
       ${nozzles.map(n=>`<div class="flex justify-between"><span class="text-slate-500">${n.product} Sales</span><span class="font-medium">${fmt.litres(n.netSale||0)}</span></div>`).join('')}
       <div class="flex justify-between font-semibold"><span>Fuel Sales</span><span>${fmt.currency(sess.calcSales||0)}</span></div>
       <div class="flex justify-between"><span class="text-slate-500">Oil / Lube</span><span>${fmt.currency(c.oilAmt||0)}</span></div>
-      <div class="flex justify-between font-semibold text-slate-700"><span>Total Expected</span><span>${fmt.currency((sess.calcSales||0)-(c.discountAmt||0)+(c.oilAmt||0))}</span></div>
+      <div class="flex justify-between font-semibold text-slate-700"><span>Total Expected</span><span>${fmt.currency(((sess.calcSales||0)+(c.oilAmt||0))-(c.discountAmt||0))}</span></div>
       <div class="border-t border-slate-200 my-2"></div>
       <div class="flex justify-between"><span class="text-slate-500">Cash</span><span>${fmt.currency(c.cashAmt||0)}</span></div>
       <div class="flex justify-between"><span class="text-slate-500">UPI</span><span>${fmt.currency(c.upiAmt||0)}</span></div>
@@ -2926,7 +2926,7 @@ async function showStaffEditModal(empId,from,to){
     </div>
     ${sessions.length?`<div class="overflow-x-auto" style="max-height:24rem;overflow-y:auto">
       <table class="data-table text-sm"><thead><tr>
-        <th>Date</th><th>Open</th><th>Close</th><th>Nozzles</th>
+        <th>Opening Date &amp; Time</th><th>Closing Date &amp; Time</th><th>Nozzles</th>
         ${products.map(p=>`<th class="text-right">${p.id} (L)</th>`).join('')}
         <th class="text-right">Total Sale ₹</th><th class="text-right">Oil ₹</th>
         <th class="text-right">Cash</th><th class="text-right">S/E</th>
@@ -2935,9 +2935,8 @@ async function showStaffEditModal(empId,from,to){
       ${sessions.map(s=>{
         const se=s.shortageExcess||0;
         return`<tr>
-          <td class="whitespace-nowrap">${fmt.date(s.checkInDate)}</td>
-          <td class="whitespace-nowrap text-xs font-mono">${s.checkInTime||'—'}</td>
-          <td class="whitespace-nowrap text-xs font-mono">${s.checkOutTime||'—'}</td>
+          <td class="whitespace-nowrap text-xs">${fmt.date(s.checkInDate)}${s.checkInTime?` · <span class="font-mono">${s.checkInTime}</span>`:''}</td>
+          <td class="whitespace-nowrap text-xs">${s.checkOutDate?fmt.date(s.checkOutDate):(s.checkOutTime?fmt.date(s.checkInDate):'—')}${s.checkOutTime?` · <span class="font-mono">${s.checkOutTime}</span>`:''}</td>
           <td class="text-xs">${(s.assignedNozzles||[]).map(n=>`${n.nozzleName} (${fmt.num(n.openingReading||0)}→${fmt.num(n.closingReading||0)}${(n.testLitres||0)>0?`, Test ${fmt.litres(n.testLitres)}`:''})`).join(', ')}</td>
           ${products.map(p=>{const n=s.assignedNozzles?.find(nz=>nz.product===p.id);return`<td class="text-right font-mono">${n?fmt.num(n.netSale||0):'—'}</td>`;}).join('')}
           <td class="text-right font-mono font-semibold">${fmt.currency(s.calcSales||0)}</td>
@@ -3116,7 +3115,7 @@ function recalcEditSE(sessId){
   const discP   =Money.toPaise(parseFloat(document.getElementById('se-discount')?.value)||0);
   // SE = (cash+upi+card+credit) − (calcSales − discount + oil)  — all in paise
   const collPaise=Money.add(cashP,upiP,cardP,creditP);
-  const duePaise =Money.add(calcPaise,-discP,oilP);
+  const duePaise =Money.add(calcPaise,oilP,-discP); // (calcSales + oil) - discount
   const sePaise  =Money.sub(collPaise,duePaise);
   const calcSales=Money.fromPaise(calcPaise);
   const se=Money.fromPaise(sePaise);
@@ -3170,7 +3169,7 @@ async function saveSessionEdit(sessId,origin='staffreport'){
   sess.calcSalesPaise=calcPaise;
   const c=sess.collections;
   const collTotalP=Money.add(c.cashPaise,c.cardPaise,c.upiPaise,c.creditPaise);
-  const dueP=Money.add(calcPaise,-c.discountPaise,c.oilPaise);
+  const dueP=Money.add(calcPaise,c.oilPaise,-c.discountPaise); // (calcSales + oil) - discount
   const sePaise=Money.sub(collTotalP,dueP);
   sess.shortageExcess=Money.fromPaise(sePaise);
   sess.shortageExcessPaise=sePaise;
