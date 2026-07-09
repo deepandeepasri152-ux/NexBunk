@@ -1457,10 +1457,8 @@ async function getAllSessions(){
 
 async function getCreditOutstanding(){
   let total=0;
-  const sKeys=DB.listKeys('pbms_credit_sale_');
-  for(const k of sKeys){const s=DB.get(k);if(s)total+=s.amount||0;}
-  const pKeys=DB.listKeys('pbms_payment_');
-  for(const k of pKeys){const p=DB.get(k);if(p)total-=p.amount||0;}
+  for(const s of DB.listActive('pbms_credit_sale_')){total+=s.amount||0;}
+  for(const p of DB.listActive('pbms_payment_')){total-=p.amount||0;}
   return Math.max(0,total);
 }
 
@@ -1494,13 +1492,20 @@ function accrueLoanInterest(loan,repayments,asOfDate){
   return Math.max(0,interest);
 }
 
-async function getCustomerOutstanding(custId){
-  let total=0;
-  const sKeys=DB.listKeys('pbms_credit_sale_');
-  for(const k of sKeys){const s=DB.get(k);if(s&&s.customerId===custId)total+=s.amount||0;}
-  const pKeys=DB.listKeys('pbms_payment_');
-  for(const k of pKeys){const p=DB.get(k);if(p&&p.customerId===custId)total-=p.amount||0;}
-  return Math.max(0,total);
+// Unified signed customer balance — replaces the old floored "outstanding"
+// calculation. Negative = amount Due from the customer. Positive = Advance
+// cash the customer has on deposit with the bunk. Zero = fully settled.
+// This single number is now the one source of truth for a customer's
+// account status everywhere in the Credit Management UI — there is no
+// longer a separate "outstanding" wallet and "advance" wallet: a payment
+// that exceeds what's due simply rolls the balance over into positive
+// territory instead of the old behavior of clamping at zero and losing
+// the excess.
+async function getCustomerBalance(custId){
+  let balance=0;
+  for(const s of DB.listActive('pbms_credit_sale_')){if(s.customerId===custId)balance-=s.amount||0;}
+  for(const p of DB.listActive('pbms_payment_')){if(p.customerId===custId)balance+=p.amount||0;}
+  return balance;
 }
 
 
@@ -4319,23 +4324,29 @@ async function loadCreditTab(tab){
 async function renderCreditManagement(el){
   const customers=DB.listActive('pbms_customer_');
   customers.sort((a,b)=>a.name.localeCompare(b.name));
-  const outstanding=await Promise.all(customers.map(c=>getCustomerOutstanding(c.id)));
-  const totalOut=outstanding.reduce((s,v)=>s+v,0);
+  const balances=await Promise.all(customers.map(c=>getCustomerBalance(c.id)));
+  const totalDue=balances.reduce((s,v)=>s+(v<0?-v:0),0);
+  const totalAdvance=balances.reduce((s,v)=>s+(v>0?v:0),0);
 
   el.innerHTML=`<div class="card px-4 py-3 mb-4 flex items-center justify-between flex-wrap gap-3">
     <div class="flex flex-wrap gap-x-6 gap-y-1 text-sm">
       <span class="text-slate-500">Customers: <strong class="text-slate-800">${customers.length}</strong></span>
-      <span class="text-slate-500">Total Outstanding: <strong class="text-red-600">${fmt.currency(totalOut)}</strong></span>
+      <span class="text-slate-500">Total Due: <strong class="text-red-600">${fmt.currency(totalDue)}</strong></span>
+      <span class="text-slate-500">Total Advance Held: <strong class="text-green-700">${fmt.currency(totalAdvance)}</strong></span>
     </div>
     <button onclick="showAddCustomerModal()" class="no-print btn btn-primary">+ Add Customer</button>
   </div>
   <div class="card overflow-hidden" id="cust-table-wrap">
     ${customers.length?`<div class="overflow-x-auto"><table class="data-table"><thead><tr>
-      <th>Customer</th><th>Phone</th><th>Credit Limit</th><th class="text-right">Outstanding ₹</th><th>Status</th><th class="no-print" style="min-width:230px">Actions</th>
+      <th>Customer</th><th>Phone</th><th>Credit Limit</th><th class="text-right">Account Balance</th><th>Status</th><th class="no-print" style="min-width:230px">Actions</th>
     </tr></thead><tbody>
     ${customers.map((c,i)=>{
-      const out=outstanding[i];
-      const overLimit=c.creditLimit&&out>c.creditLimit;
+      const bal=balances[i];
+      const due=bal<0?-bal:0;
+      const overLimit=c.creditLimit&&due>c.creditLimit;
+      const balCls=bal<0?'text-red-600':bal>0?'text-green-700':'text-slate-400';
+      const balLabel=bal<0?`Due: ${fmt.currency(due)}`:bal>0?`Advance: ${fmt.currency(bal)}`:'Settled';
+      const statusBadge=bal===0?'<span class="badge badge-green">Settled</span>':bal>0?'<span class="badge badge-blue">Advance</span>':overLimit?'<span class="badge badge-red">Over Limit</span>':'<span class="badge badge-amber">Due</span>';
       return`<tr>
         <td><div class="flex items-center gap-2">
           <div class="w-7 h-7 ${aColor(i)} rounded-full flex items-center justify-center text-white text-xs font-bold">${aInitials(c.name)}</div>
@@ -4343,11 +4354,11 @@ async function renderCreditManagement(el){
         </div></td>
         <td>${c.phone||'—'}</td>
         <td>${c.creditLimit?fmt.currency(c.creditLimit):'Unlimited'}</td>
-        <td class="text-right font-semibold ${out>0?'text-red-600':''}">${fmt.currency(out)}</td>
-        <td>${out<=0?'<span class="badge badge-green">Settled</span>':overLimit?'<span class="badge badge-red">Over Limit</span>':'<span class="badge badge-amber">Outstanding</span>'}</td>
+        <td class="text-right font-semibold ${balCls}">${balLabel}</td>
+        <td>${statusBadge}</td>
         <td class="no-print"><div class="flex items-center gap-1 flex-nowrap">
           <button onclick="showCreditSaleModal('${c.id}')" class="btn btn-sm btn-orange-sm whitespace-nowrap">+ Sale</button>
-          <button onclick="showPaymentModal('${c.id}')" class="btn btn-sm btn-green-sm whitespace-nowrap">+ Pay</button>
+          <button onclick="showPaymentModal('${c.id}')" class="btn btn-sm btn-green-sm whitespace-nowrap">+ Cash/Payment</button>
           <button onclick="showCustomerLedger('${c.id}')" class="btn btn-sm btn-blue-sm whitespace-nowrap">Ledger</button>
           <button onclick="showAddCustomerModal('${c.id}')" class="btn btn-sm btn-ghost whitespace-nowrap">Edit</button>
           <button onclick="deleteCustomer('${c.id}')" class="btn btn-sm btn-red-sm whitespace-nowrap">Del</button>
@@ -4528,25 +4539,30 @@ async function saveCreditSale(custId){
 
 async function showPaymentModal(custId){
   const cust=DB.getActive(`pbms_customer_${custId}`);
-  const out=await getCustomerOutstanding(custId);
+  const bal=await getCustomerBalance(custId);
+  const due=bal<0?-bal:0;
+  const boxCls=bal<0?'bg-amber-50 border-amber-200':bal>0?'bg-green-50 border-green-200':'bg-slate-50 border-slate-200';
+  const balCls=bal<0?'text-red-600':bal>0?'text-green-700':'text-slate-500';
+  const balLabel=bal<0?`Due: ${fmt.currency(due)}`:bal>0?`Advance: ${fmt.currency(bal)}`:'Settled';
   showModal(`<div class="p-6">
     <div class="flex items-center justify-between mb-5">
-      <h2 class="text-lg font-bold text-slate-800">Record Payment — ${cust?.name||''}</h2>
+      <h2 class="text-lg font-bold text-slate-800">Record Cash / Payment — ${cust?.name||''}</h2>
       <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600">✕</button>
     </div>
-    <div class="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4 text-sm">
-      <span class="text-amber-700">Outstanding: </span><strong class="text-red-600">${fmt.currency(out)}</strong>
+    <div class="${boxCls} border rounded-lg p-3 mb-4 text-sm">
+      <span class="text-slate-500">Account Balance: </span><strong class="${balCls}">${balLabel}</strong>
+      ${bal>=0?`<div class="text-xs text-slate-400 mt-1">Any amount recorded here adds to this customer's advance balance for future credit sales to draw down against.</div>`:''}
     </div>
     <div class="grid grid-cols-2 gap-4">
       <div><label class="form-label">Date *</label><input type="date" id="pay-date" class="form-input" value="${fmt.today()}" max="${fmt.today()}"></div>
-      <div><label class="form-label">Amount ₹ *</label><input type="number" id="pay-amt" class="form-input text-right font-mono" step="0.01" min="0.01" value="${out||''}" placeholder="0.00"></div>
+      <div><label class="form-label">Amount ₹ *</label><input type="number" id="pay-amt" class="form-input text-right font-mono" step="0.01" min="0.01" value="${due||''}" placeholder="0.00"></div>
       <div><label class="form-label">Mode</label><select id="pay-mode" class="form-input"><option>Cash</option><option>UPI</option><option>Bank Transfer</option><option>Cheque</option></select></div>
       <div><label class="form-label">Reference No.</label><input type="text" id="pay-ref" class="form-input" placeholder="UPI ref / Cheque no."></div>
       <div class="col-span-2"><label class="form-label">Remarks</label><input type="text" id="pay-rem" class="form-input" placeholder="Optional"></div>
     </div>
     <div class="flex gap-3 justify-end mt-6 pt-4 border-t border-slate-100">
       <button onclick="closeModal()" class="btn btn-ghost">Cancel</button>
-      <button onclick="savePayment('${custId}')" class="btn btn-success">Save Payment</button>
+      <button onclick="savePayment('${custId}')" class="btn btn-success">Save</button>
     </div>
   </div>`,()=>loadCreditTab('credit'));
 }
@@ -4560,28 +4576,33 @@ async function savePayment(custId){
     mode:document.getElementById('pay-mode')?.value||'Cash',
     referenceNo:document.getElementById('pay-ref')?.value||'',
     remarks:document.getElementById('pay-rem')?.value||'',createdAt:new Date().toISOString()});
-  toast('Payment recorded','success');closeModal();await loadCreditTab('credit');
+  await Audit.log('payment_added','payment',payId,{customerId:custId,amount:amt});
+  const newBal=await getCustomerBalance(custId);
+  const resultMsg=newBal<0?`Due: ${fmt.currency(-newBal)}`:newBal>0?`Advance: ${fmt.currency(newBal)}`:'Account settled';
+  toast(`Payment of ${fmt.currency(amt)} recorded. ${resultMsg}`,'success');
+  closeModal();await loadCreditTab('credit');
 }
 
 async function showCustomerLedger(custId){
   const cust=DB.getActive(`pbms_customer_${custId}`);
-  const sKeys=DB.listKeys('pbms_credit_sale_');
-  const pKeys=DB.listKeys('pbms_payment_');
-  const sales=[];for(const k of sKeys){const s=DB.get(k);if(s&&s.customerId===custId)sales.push(s);}
-  const payments=[];for(const k of pKeys){const p=DB.get(k);if(p&&p.customerId===custId)payments.push(p);}
+  const sales=DB.listActive('pbms_credit_sale_').filter(s=>s.customerId===custId);
+  const payments=DB.listActive('pbms_payment_').filter(p=>p.customerId===custId);
   const entries=[...sales.map(s=>{
     const isCashAdv=s.saleType==='CashAdvance';
-    return{date:s.date,createdAt:s.createdAt,
+    return{id:s.id,kind:'sale',isCashAdv,date:s.date,createdAt:s.createdAt,
       type:isCashAdv?'Cash Advance':'Sale',
       desc:isCashAdv
         ?`${s.givenVia||'Cash'}${s.referenceNo?' · '+s.referenceNo:''}${s.note?' — '+s.note:''}`
         :`${s.product} ${fmt.litres(s.quantity||0)} @ ₹${s.rate}${s.vehicleNo?' ('+s.vehicleNo+')':''}`,
       debit:s.amount||0,credit:0};
   }),
-    ...payments.map(p=>({date:p.date,createdAt:p.createdAt,type:'Payment',desc:`${p.mode} ${p.referenceNo||''}`,debit:0,credit:p.amount||0}))];
+    ...payments.map(p=>({id:p.id,kind:'payment',date:p.date,createdAt:p.createdAt,type:'Payment',desc:`${p.mode} ${p.referenceNo||''}`,debit:0,credit:p.amount||0}))];
   entries.sort((a,b)=>(a.date||'').localeCompare(b.date||''));
   let balance=0;
-  const rows=entries.map(e=>{balance+=e.debit-e.credit;return{...e,balance};});
+  // Running balance in the unified sign convention: sales (debit) push it
+  // negative (Due), payments (credit) push it positive (Advance) — matches
+  // getCustomerBalance exactly, so this ledger and the customer list always agree.
+  const rows=entries.map(e=>{balance+=e.credit-e.debit;return{...e,balance};});
   const typeBadge={
     'Sale':'badge-amber','Payment':'badge-green',
     'Cash Advance':'text-purple-700 bg-purple-100'
@@ -4592,21 +4613,195 @@ async function showCustomerLedger(custId){
       <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600">✕</button>
     </div>
     <div class="overflow-x-auto max-h-96 overflow-y-auto">
-      <table class="data-table text-sm"><thead><tr><th>Date</th><th>Type</th><th>Description</th><th class="text-right">Debit ₹</th><th class="text-right">Credit ₹</th><th class="text-right">Balance ₹</th></tr></thead>
+      <table class="data-table text-sm"><thead><tr><th>Date</th><th>Type</th><th>Description</th><th class="text-right">Debit ₹</th><th class="text-right">Credit ₹</th><th class="text-right">Account Balance</th><th class="no-print">Actions</th></tr></thead>
       <tbody>${rows.length?rows.map(r=>`<tr><td>${fmt.date(r.date)}<div class="text-xs text-slate-400">${fmt.timeOf(r.createdAt)}</div></td>
         <td><span class="badge ${typeBadge[r.type]||'badge-gray'} text-xs">${r.type}</span></td>
         <td>${r.desc}</td>
         <td class="text-right ${r.debit>0?'text-red-600':''}">${r.debit>0?fmt.currency(r.debit):'—'}</td>
         <td class="text-right ${r.credit>0?'text-green-700':''}">${r.credit>0?fmt.currency(r.credit):'—'}</td>
-        <td class="text-right font-semibold ${r.balance>0?'text-red-600':''}">${fmt.currency(r.balance)}</td></tr>`).join(''):
-        '<tr><td colspan="6" class="text-center text-slate-400 py-6">No transactions</td></tr>'}
+        <td class="text-right font-semibold ${r.balance<0?'text-red-600':r.balance>0?'text-green-700':'text-slate-400'}">${r.balance<0?`Due: ${fmt.currency(-r.balance)}`:r.balance>0?`Adv: ${fmt.currency(r.balance)}`:'Settled'}</td>
+        <td class="no-print whitespace-nowrap">${r.kind==='sale'?
+          `<button onclick="editCreditSale('${r.id}','${custId}')" class="btn btn-sm btn-gray-sm">Edit</button> <button onclick="deleteCreditSale('${r.id}','${custId}')" class="btn btn-sm btn-red-sm">Del</button>`
+          :`<button onclick="editPayment('${r.id}','${custId}')" class="btn btn-sm btn-gray-sm">Edit</button> <button onclick="deletePayment('${r.id}','${custId}')" class="btn btn-sm btn-red-sm">Del</button>`}</td></tr>`).join(''):
+        '<tr><td colspan="7" class="text-center text-slate-400 py-6">No transactions</td></tr>'}
       </tbody></table>
     </div>
     <div class="flex justify-between items-center mt-4 pt-4 border-t border-slate-100">
       <span class="text-sm text-slate-500">${rows.length} transactions</span>
-      <div class="font-bold text-sm">Outstanding: <span class="text-red-600">${fmt.currency(balance)}</span></div>
+      <div class="font-bold text-sm">Account Balance: <span class="${balance<0?'text-red-600':balance>0?'text-green-700':'text-slate-400'}">${balance<0?`Due: ${fmt.currency(-balance)}`:balance>0?`Advance: ${fmt.currency(balance)}`:'Settled'}</span></div>
     </div>
   </div>`);
+}
+
+// Credit sale / cash-advance entries had no edit or delete path at all — a
+// mistyped quantity, rate, or cash-advance amount could never be corrected
+// short of manually poking IndexedDB. These close the gap, with a required
+// edit reason and full audit trail, matching the loan repayment fix above.
+async function editCreditSale(saleId,custId){
+  const sale=DB.getActive(`pbms_credit_sale_${saleId}`);
+  if(!sale){toast('Entry not found','error');return;}
+  const isCashAdv=sale.saleType==='CashAdvance';
+  const esc=s=>(s||'').replace(/"/g,'&quot;');
+  showModal(`<div class="p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-bold text-slate-800">Edit ${isCashAdv?'Cash Advance':'Credit Sale'}</h2>
+      <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600">✕</button>
+    </div>
+    <div class="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+      <strong>Note:</strong> Recorded in the audit log with a before/after diff. Affects this customer's outstanding balance immediately.
+    </div>
+    ${isCashAdv?`
+    <div class="grid grid-cols-2 gap-4">
+      <div><label class="form-label">Date *</label><input type="date" id="ces-date" class="form-input" value="${sale.date||''}" max="${fmt.today()}"></div>
+      <div><label class="form-label">Amount ₹ *</label><input type="number" id="ces-amt" class="form-input text-right font-mono" step="0.01" min="0.01" value="${sale.amount||''}"></div>
+      <div><label class="form-label">Given Via</label><select id="ces-via" class="form-input">
+        ${['Cash','NEFT','UPI','Cheque'].map(v=>`<option ${sale.givenVia===v?'selected':''}>${v}</option>`).join('')}
+      </select></div>
+      <div><label class="form-label">Reference No.</label><input type="text" id="ces-ref" class="form-input" value="${esc(sale.referenceNo)}"></div>
+      <div class="col-span-2"><label class="form-label">Note</label><input type="text" id="ces-note" class="form-input" value="${esc(sale.note)}"></div>
+    </div>`:`
+    <div class="grid grid-cols-2 gap-4">
+      <div><label class="form-label">Date *</label><input type="date" id="ces-date" class="form-input" value="${sale.date||''}" max="${fmt.today()}"></div>
+      <div><label class="form-label">Qty (L) *</label><input type="number" id="ces-qty" class="form-input text-right font-mono" step="0.01" min="0.01" value="${sale.quantity||''}" oninput="calcEditCreditSaleAmt()"></div>
+      <div><label class="form-label">Rate ₹/L</label><input type="number" id="ces-rate" class="form-input text-right font-mono" step="0.01" min="0" value="${sale.rate||''}" oninput="calcEditCreditSaleAmt()"></div>
+      <div><label class="form-label">Amount ₹ 🔵</label><input type="text" id="ces-amt-display" class="auto-field form-input text-right font-mono" readonly value="${sale.amount?fmt.num(sale.amount):''}"></div>
+      <div><label class="form-label">Vehicle No.</label><input type="text" id="ces-veh" class="form-input" value="${esc(sale.vehicleNo)}"></div>
+      <div><label class="form-label">Driver Name</label><input type="text" id="ces-driver" class="form-input" value="${esc(sale.driverName)}"></div>
+      <div class="col-span-2"><label class="form-label">Remarks</label><input type="text" id="ces-rem" class="form-input" value="${esc(sale.remarks)}"></div>
+    </div>`}
+    <div class="mt-4">
+      <label class="form-label text-xs text-red-600">Reason for Edit * (required)</label>
+      <input type="text" id="ces-reason" class="form-input text-sm" placeholder="e.g. Wrong quantity entered">
+    </div>
+    <div class="flex gap-3 justify-end mt-6 pt-4 border-t border-slate-100">
+      <button onclick="closeModal()" class="btn btn-ghost">Cancel</button>
+      <button onclick="saveCreditSaleEdit('${saleId}','${custId}',${isCashAdv})" class="btn btn-primary">Save Changes</button>
+    </div>
+  </div>`,()=>showCustomerLedger(custId));
+}
+
+function calcEditCreditSaleAmt(){
+  const qty=parseFloat(document.getElementById('ces-qty')?.value)||0;
+  const rate=parseFloat(document.getElementById('ces-rate')?.value)||0;
+  const el=document.getElementById('ces-amt-display');
+  if(el)el.value=qty>0&&rate>0?fmt.num(qty*rate):'';
+}
+
+async function saveCreditSaleEdit(saleId,custId,isCashAdv){
+  const reason=document.getElementById('ces-reason')?.value?.trim();
+  if(!reason){toast('Reason for edit is required','error');return;}
+  const sale=DB.getActive(`pbms_credit_sale_${saleId}`);
+  if(!sale){toast('Entry not found','error');return;}
+  const date=document.getElementById('ces-date')?.value;
+  if(!date){toast('Select a date','error');return;}
+  const before={date:sale.date,amount:sale.amount,quantity:sale.quantity,rate:sale.rate,vehicleNo:sale.vehicleNo,driverName:sale.driverName,remarks:sale.remarks,givenVia:sale.givenVia,referenceNo:sale.referenceNo,note:sale.note};
+  let after;
+  if(isCashAdv){
+    const amt=parseFloat(document.getElementById('ces-amt')?.value)||0;
+    if(amt<=0){toast('Enter a valid amount','error');return;}
+    after={date,amount:amt,givenVia:document.getElementById('ces-via')?.value||'Cash',referenceNo:document.getElementById('ces-ref')?.value||'',note:document.getElementById('ces-note')?.value||''};
+  } else {
+    const qty=parseFloat(document.getElementById('ces-qty')?.value)||0;
+    const rate=parseFloat(document.getElementById('ces-rate')?.value)||0;
+    if(qty<=0||rate<=0){toast('Enter valid quantity and rate','error');return;}
+    after={date,quantity:qty,rate,amount:qty*rate,
+      vehicleNo:document.getElementById('ces-veh')?.value||'',
+      driverName:document.getElementById('ces-driver')?.value||'',
+      remarks:document.getElementById('ces-rem')?.value||''};
+  }
+  const editedAt=new Date().toISOString();
+  const updated={...sale,...after,editHistory:[...(sale.editHistory||[]),{editedAt,reason,before}]};
+  DB.set(`pbms_credit_sale_${saleId}`,updated);
+  await Audit.log('credit_sale_edited','credit_sale',saleId,{customerId:custId,before,after,reason});
+  toast('Entry updated','success');
+  await loadCreditTab('credit');
+  await showCustomerLedger(custId);
+}
+
+async function deleteCreditSale(saleId,custId){
+  requirePIN('Deleting a credit ledger entry requires manager approval',()=>{
+  showConfirm('Delete Entry',
+    'This removes the entry from the customer\'s ledger and reduces their outstanding balance accordingly. This is recorded in the audit log.',
+    async()=>{
+      const sale=DB.get(`pbms_credit_sale_${saleId}`);
+      const deletedAt=new Date().toISOString();const deletedBy=APP.userEmail||'Manager';
+      if(sale)DB.set(`pbms_credit_sale_${saleId}`,{...sale,deleted:true,deletedAt,deletedBy});
+      await Audit.log('credit_sale_deleted','credit_sale',saleId,{customerId:custId,amount:sale?.amount});
+      toast('Entry deleted','success');
+      await loadCreditTab('credit');
+      await showCustomerLedger(custId);
+    },'Delete');
+  });
+}
+
+async function editPayment(payId,custId){
+  const pay=DB.getActive(`pbms_payment_${payId}`);
+  if(!pay){toast('Payment not found','error');return;}
+  const esc=s=>(s||'').replace(/"/g,'&quot;');
+  showModal(`<div class="p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-bold text-slate-800">Edit Payment</h2>
+      <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600">✕</button>
+    </div>
+    <div class="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+      <strong>Note:</strong> Recorded in the audit log. Affects this customer's outstanding balance immediately.
+    </div>
+    <div class="grid grid-cols-2 gap-4">
+      <div><label class="form-label">Date *</label><input type="date" id="pe-date" class="form-input" value="${pay.date||''}" max="${fmt.today()}"></div>
+      <div><label class="form-label">Amount ₹ *</label><input type="number" id="pe-amt" class="form-input text-right font-mono" step="0.01" min="0.01" value="${pay.amount||''}"></div>
+      <div><label class="form-label">Mode</label><select id="pe-mode" class="form-input">
+        ${['Cash','UPI','Bank Transfer','Cheque'].map(m=>`<option ${pay.mode===m?'selected':''}>${m}</option>`).join('')}
+      </select></div>
+      <div><label class="form-label">Reference No.</label><input type="text" id="pe-ref" class="form-input" value="${esc(pay.referenceNo)}"></div>
+      <div class="col-span-2"><label class="form-label">Remarks</label><input type="text" id="pe-rem" class="form-input" value="${esc(pay.remarks)}"></div>
+      <div class="col-span-2">
+        <label class="form-label text-xs text-red-600">Reason for Edit * (required)</label>
+        <input type="text" id="pe-reason" class="form-input text-sm" placeholder="e.g. Wrong amount entered">
+      </div>
+    </div>
+    <div class="flex gap-3 justify-end mt-6 pt-4 border-t border-slate-100">
+      <button onclick="closeModal()" class="btn btn-ghost">Cancel</button>
+      <button onclick="savePaymentEdit('${payId}','${custId}')" class="btn btn-primary">Save Changes</button>
+    </div>
+  </div>`,()=>showCustomerLedger(custId));
+}
+
+async function savePaymentEdit(payId,custId){
+  const reason=document.getElementById('pe-reason')?.value?.trim();
+  if(!reason){toast('Reason for edit is required','error');return;}
+  const date=document.getElementById('pe-date')?.value;
+  const amt=parseFloat(document.getElementById('pe-amt')?.value)||0;
+  if(!date){toast('Select a date','error');return;}
+  if(amt<=0){toast('Enter a valid amount','error');return;}
+  const pay=DB.getActive(`pbms_payment_${payId}`);
+  if(!pay){toast('Payment not found','error');return;}
+  const before={date:pay.date,amount:pay.amount,mode:pay.mode,referenceNo:pay.referenceNo,remarks:pay.remarks};
+  const after={date,amount:amt,mode:document.getElementById('pe-mode')?.value||'Cash',
+    referenceNo:document.getElementById('pe-ref')?.value||'',
+    remarks:document.getElementById('pe-rem')?.value||''};
+  const editedAt=new Date().toISOString();
+  const updated={...pay,...after,editHistory:[...(pay.editHistory||[]),{editedAt,reason,before}]};
+  DB.set(`pbms_payment_${payId}`,updated);
+  await Audit.log('payment_edited','payment',payId,{customerId:custId,before,after,reason});
+  toast('Payment updated','success');
+  await loadCreditTab('credit');
+  await showCustomerLedger(custId);
+}
+
+async function deletePayment(payId,custId){
+  requirePIN('Deleting a payment record requires manager approval',()=>{
+  showConfirm('Delete Payment',
+    'This removes the payment from the ledger and increases the customer\'s outstanding balance accordingly. This is recorded in the audit log.',
+    async()=>{
+      const pay=DB.get(`pbms_payment_${payId}`);
+      const deletedAt=new Date().toISOString();const deletedBy=APP.userEmail||'Manager';
+      if(pay)DB.set(`pbms_payment_${payId}`,{...pay,deleted:true,deletedAt,deletedBy});
+      await Audit.log('payment_deleted','payment',payId,{customerId:custId,amount:pay?.amount});
+      toast('Payment deleted','success');
+      await loadCreditTab('credit');
+      await showCustomerLedger(custId);
+    },'Delete');
+  });
 }
 
 // ====================================================
@@ -4763,13 +4958,32 @@ async function showAddLoanModal(){
   </div>`,()=>loadCreditTab('loan'));
 }
 
-async function saveLoan(existingId){
+async function saveLoan(existingId,force){
   const lender=document.getElementById('loan-lender')?.value?.trim();
   const date=document.getElementById('loan-date')?.value;
   const principal=parseFloat(document.getElementById('loan-principal')?.value)||0;
   if(!lender){toast('Enter lender name','error');return;}
   if(!date){toast('Select a date','error');return;}
   if(principal<=0){toast('Enter principal amount','error');return;}
+
+  // Duplicate-lender guard — only when creating a brand-new loan (not editing
+  // an existing one). Same lender name already having a loan on record is
+  // almost always either a duplicate double-click or someone forgetting the
+  // lender already has an account — either way it silently creates a second,
+  // unrelated loan record for the same person/bank if we don't check.
+  if(!existingId&&!force){
+    const dupe=DB.listActive('pbms_loan_').find(l=>l&&(l.lenderName||'').trim().toLowerCase()===lender.toLowerCase());
+    if(dupe){
+      const repKeys=DB.listActive('pbms_loan_repayment_');
+      let repaid=0;for(const r of repKeys){if(r?.loanId===dupe.id)repaid+=(r.amount||0);}
+      const out=Math.max(0,(dupe.principalAmount||0)-repaid);
+      showConfirm('Lender Already Has A Loan On Record',
+        `${lender} already has a loan of ${fmt.currency(dupe.principalAmount||0)} dated ${fmt.date(dupe.startDate)}${out>0?` (${fmt.currency(out)} still outstanding)`:' (already fully repaid)'}. Adding this will create a SEPARATE loan account for the same lender — not add to the existing one. If this is meant to be a repayment or a top-up on the existing loan, cancel this and use "+ Repay" or "Edit" on that loan instead. Continue and create a new, separate loan anyway?`,
+        ()=>saveLoan(existingId,true),'Create Separate Loan','bg-amber-600 hover:bg-amber-700');
+      return;
+    }
+  }
+
   const loanId=existingId||`LOAN-${Date.now()}`;
   const existing=existingId?DB.get(`pbms_loan_${loanId}`):{};
   DB.set(`pbms_loan_${loanId}`,{...existing,id:loanId,lenderName:lender,startDate:date,
@@ -4916,13 +5130,13 @@ async function showLoanLedger(loanId){
 
   // Build ledger rows
   let balance=principal;
-  const rows=[{date:loan.startDate,createdAt:loan.createdAt,type:'Loan Taken',desc:`Principal from ${loan.lenderName}${loan.purpose?' · '+loan.purpose:''}`,debit:principal,credit:0,balance}];
+  const rows=[{id:null,date:loan.startDate,createdAt:loan.createdAt,type:'Loan Taken',desc:`Principal from ${loan.lenderName}${loan.purpose?' · '+loan.purpose:''}`,debit:principal,credit:0,balance}];
   repayments.forEach(r=>{
     balance-=(r.amount||0);
-    rows.push({date:r.date,createdAt:r.createdAt,type:'Repayment',desc:`${r.mode||'Cash'}${r.referenceNo?' · '+r.referenceNo:''}${r.remarks?' — '+r.remarks:''}`,debit:0,credit:r.amount||0,balance:Math.max(0,balance)});
+    rows.push({id:r.id,date:r.date,createdAt:r.createdAt,type:'Repayment',desc:`${r.mode||'Cash'}${r.referenceNo?' · '+r.referenceNo:''}${r.remarks?' — '+r.remarks:''}`,debit:0,credit:r.amount||0,balance:Math.max(0,balance)});
   });
 
-  showModal(`<div class="p-5" style="min-width:min(700px,90vw)">
+  showModal(`<div class="p-5" style="min-width:min(760px,90vw)">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-lg font-bold text-slate-800">Loan Ledger — ${loan.lenderName}</h2>
       <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">✕</button>
@@ -4956,6 +5170,7 @@ async function showLoanLedger(loanId){
           <th class="text-right">Borrowed ₹</th>
           <th class="text-right">Repaid ₹</th>
           <th class="text-right">Balance ₹</th>
+          <th class="no-print">Actions</th>
         </tr></thead>
         <tbody>
           ${rows.map(r=>`<tr>
@@ -4965,6 +5180,7 @@ async function showLoanLedger(loanId){
             <td class="text-right font-mono">${r.debit>0?fmt.currency(r.debit):'—'}</td>
             <td class="text-right font-mono text-green-700">${r.credit>0?fmt.currency(r.credit):'—'}</td>
             <td class="text-right font-mono font-semibold ${r.balance>0?'text-red-600':'text-green-700'}">${fmt.currency(r.balance)}</td>
+            <td class="no-print whitespace-nowrap">${r.id?`<button onclick="editRepayment('${r.id}','${loanId}')" class="btn btn-sm btn-gray-sm">Edit</button> <button onclick="deleteRepayment('${r.id}','${loanId}')" class="btn btn-sm btn-red-sm">Del</button>`:'<span class="text-xs text-slate-400">—</span>'}</td>
           </tr>`).join('')}
           ${interest>0?`<tr class="bg-amber-50">
             <td class="whitespace-nowrap">${fmt.date(today)}</td>
@@ -4973,6 +5189,7 @@ async function showLoanLedger(loanId){
             <td class="text-right font-mono text-amber-700">${fmt.currency(interest)}</td>
             <td>—</td>
             <td class="text-right font-mono font-semibold text-amber-700">${fmt.currency(outstanding+interest)}</td>
+            <td class="no-print">—</td>
           </tr>`:''}
         </tbody>
       </table>
@@ -4985,7 +5202,108 @@ async function showLoanLedger(loanId){
         <button onclick="closeModal()" class="btn btn-sm btn-ghost">Close</button>
       </div>
     </div>
-  </div>`);
+  </div>`,undefined);
+}
+
+// Edit a previously-entered repayment — was previously wired up in the ledger
+// (Edit button) with no matching function defined anywhere, so clicking it
+// silently did nothing and mistaken entries could never be corrected.
+async function editRepayment(repId,loanId){
+  const rep=DB.getActive(`pbms_loan_repayment_${repId}`);
+  if(!rep){toast('Repayment not found','error');return;}
+  const loan=DB.getActive(`pbms_loan_${loanId}`);
+  if(!loan){toast('Loan not found','error');return;}
+  const rKeys=DB.listActive('pbms_loan_repayment_');
+  let totalRepaidExcl=0;
+  for(const r of rKeys){if(r?.loanId===loanId&&r.id!==repId)totalRepaidExcl+=(r.amount||0);}
+  const maxAllowed=Math.max(0,(loan.principalAmount||0)-totalRepaidExcl);
+  const editCount=(rep.editHistory||[]).length;
+  showModal(`<div class="p-6">
+    <div class="flex items-center justify-between mb-5">
+      <h2 class="text-lg font-bold text-slate-800">Edit Repayment</h2>
+      <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">✕</button>
+    </div>
+    <div class="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2 text-xs text-amber-800">
+      <span><strong>Note:</strong> This change is recorded in the audit log with a before/after diff and affects the loan's outstanding balance and repayment history immediately.</span>
+    </div>
+    <div class="grid grid-cols-2 gap-4">
+      <div><label class="form-label">Date *</label>
+        <input type="date" id="rep-edit-date" class="form-input" value="${rep.date||''}" max="${fmt.today()}"></div>
+      <div><label class="form-label">Amount ₹ *</label>
+        <input type="number" id="rep-edit-amt" class="form-input text-right font-mono" step="0.01" min="0.01" max="${maxAllowed.toFixed(2)}" value="${rep.amount||''}">
+        <div class="text-xs text-slate-400 mt-1">Max allowed: ${fmt.currency(maxAllowed)} (principal minus other repayments)</div>
+      </div>
+      <div><label class="form-label">Payment Mode</label>
+        <select id="rep-edit-mode" class="form-input">
+          ${['Cash','UPI','Card','Bank Transfer'].map(m=>`<option ${rep.mode===m?'selected':''}>${m}</option>`).join('')}
+        </select></div>
+      <div><label class="form-label">Reference / Cheque No.</label>
+        <input type="text" id="rep-edit-ref" class="form-input" value="${(rep.referenceNo||'').replace(/"/g,'&quot;')}" placeholder="Optional"></div>
+      <div class="col-span-2"><label class="form-label">Remarks</label>
+        <input type="text" id="rep-edit-rem" class="form-input" value="${(rep.remarks||'').replace(/"/g,'&quot;')}" placeholder="Optional"></div>
+      <div class="col-span-2">
+        <label class="form-label text-xs text-red-600">Reason for Edit * (required)</label>
+        <input type="text" id="rep-edit-reason" class="form-input text-sm" placeholder="e.g. Entered wrong amount by mistake">
+      </div>
+    </div>
+    ${editCount>0?`<div class="mt-3 text-xs text-slate-400">Previously edited ${editCount} time(s).</div>`:''}
+    <div class="flex gap-3 justify-end mt-6 pt-4 border-t border-slate-100">
+      <button onclick="closeModal()" class="btn btn-ghost">Cancel</button>
+      <button onclick="saveRepaymentEdit('${repId}','${loanId}')" class="btn btn-primary">Save Changes</button>
+    </div>
+  </div>`,()=>showLoanLedger(loanId));
+}
+
+async function saveRepaymentEdit(repId,loanId){
+  const reason=document.getElementById('rep-edit-reason')?.value?.trim();
+  if(!reason){toast('Reason for edit is required','error');return;}
+  const date=document.getElementById('rep-edit-date')?.value;
+  const amt=parseFloat(document.getElementById('rep-edit-amt')?.value)||0;
+  if(!date){toast('Select a date','error');return;}
+  if(amt<=0){toast('Enter a valid amount','error');return;}
+
+  const rep=DB.getActive(`pbms_loan_repayment_${repId}`);
+  if(!rep){toast('Repayment not found','error');return;}
+  const loan=DB.getActive(`pbms_loan_${loanId}`);
+  const rKeys=DB.listActive('pbms_loan_repayment_');
+  let totalRepaidExcl=0;
+  for(const r of rKeys){if(r?.loanId===loanId&&r.id!==repId)totalRepaidExcl+=(r.amount||0);}
+  const maxAllowed=Math.max(0,(loan?.principalAmount||0)-totalRepaidExcl);
+  if(amt>maxAllowed+0.01){
+    toast(`Amount ₹${amt.toFixed(2)} exceeds outstanding ₹${maxAllowed.toFixed(2)}`,'error');return;
+  }
+
+  const before={date:rep.date,amount:rep.amount,mode:rep.mode,referenceNo:rep.referenceNo,remarks:rep.remarks};
+  const editedAt=new Date().toISOString();
+  const after={
+    date,amount:amt,
+    mode:document.getElementById('rep-edit-mode')?.value||'Cash',
+    referenceNo:document.getElementById('rep-edit-ref')?.value||'',
+    remarks:document.getElementById('rep-edit-rem')?.value||''
+  };
+  const updated={...rep,...after,
+    editHistory:[...(rep.editHistory||[]),{editedAt,reason,before}]};
+  DB.set(`pbms_loan_repayment_${repId}`,updated);
+  await Audit.log('repayment_edited','loan_repayment',repId,{loanId,before,after,reason});
+  toast('Repayment updated','success');
+  await loadCreditTab('loan');
+  await showLoanLedger(loanId);
+}
+
+async function deleteRepayment(repId,loanId){
+  requirePIN('Deleting a repayment record requires manager approval',()=>{
+  showConfirm('Delete Repayment',
+    'This removes the repayment from the ledger and increases the loan\'s outstanding balance by that amount. This is recorded in the audit log.',
+    async()=>{
+      const rep=DB.get(`pbms_loan_repayment_${repId}`);
+      const deletedAt=new Date().toISOString();const deletedBy=APP.userEmail||'Manager';
+      if(rep)DB.set(`pbms_loan_repayment_${repId}`,{...rep,deleted:true,deletedAt,deletedBy});
+      await Audit.log('repayment_deleted','loan_repayment',repId,{loanId,amount:rep?.amount,date:rep?.date});
+      toast('Repayment deleted','success');
+      await loadCreditTab('loan');
+      await showLoanLedger(loanId);
+    },'Delete');
+  });
 }
 
 async function editLoan(id){
@@ -5130,11 +5448,9 @@ async function loadSettlementForDate(date){
   // Cash Collection → Expenses → Deposit flow too, not straight to the bank.
   // Non-cash recoveries (UPI/Bank Transfer/Cheque) bypass Daily Settlement
   // entirely and post directly in Bank Book — see buildBankBook.
-  const payKeys3=DB.listKeys('pbms_payment_');
   let creditRecoveryCash=0;
-  for(const k of payKeys3){
-    const p=DB.get(k);
-    if(!p||p.date!==date||p.mode!=='Cash')continue;
+  for(const p of DB.listActive('pbms_payment_')){
+    if(p.date!==date||p.mode!=='Cash')continue;
     creditRecoveryCash+=p.amount||0;
   }
 
@@ -5154,10 +5470,9 @@ async function loadSettlementForDate(date){
     if(!e.mode||e.mode==='Cash'){cashExpItems.push({...e,_src:'expense'});autoCashExp+=e.amount||0;}
   }
   // Also include Cash Advances given via Cash for this date
-  const caKeys=DB.listKeys('pbms_credit_sale_');
-  for(const k of caKeys){
-    const cs=DB.get(k);
-    if(!cs||cs.date!==date||cs.saleType!=='CashAdvance')continue;
+  const caKeys=DB.listActive('pbms_credit_sale_');
+  for(const cs of caKeys){
+    if(cs.date!==date||cs.saleType!=='CashAdvance')continue;
     if(!cs.givenVia||cs.givenVia==='Cash'){
       cashExpItems.push({description:`${cs.customerName||'Customer'} — Cash Advance`,
         category:'Cash Advance',amount:cs.amount||0,_src:'advance'});
@@ -5691,9 +6006,8 @@ async function buildBankBook(fromDate,toDate){
   // Collection first, and reaches the bank via that "Cash Deposit" row once
   // settled (see loadSettlementForDate). Only non-cash modes are a genuine,
   // independent bank movement and get posted here directly.
-  const payKeys=DB.listKeys('pbms_payment_');
-  for(const k of payKeys){
-    const p=DB.get(k);if(!p||p.date<fromDate||p.date>toDate)continue;
+  for(const p of DB.listActive('pbms_payment_')){
+    if(p.date<fromDate||p.date>toDate)continue;
     if(p.mode==='Cash')continue;
     const custName=custMap[p.customerId]?.name||p.customerName||'Customer';
     rows.push({date:p.date,desc:`${custName} — ${p.mode||'NEFT'} payment`,type:'Credit Recovery',ref:p.referenceNo||'',in:p.amount||0,out:0,createdAt:p.createdAt});
@@ -5719,9 +6033,9 @@ async function buildBankBook(fromDate,toDate){
   }
 
   // 6. Cash advances via bank mode
-  const caKeys=DB.listKeys('pbms_credit_sale_');
-  for(const k of caKeys){
-    const cs=DB.get(k);if(!cs||cs.date<fromDate||cs.date>toDate)continue;
+  const caKeys=DB.listActive('pbms_credit_sale_');
+  for(const cs of caKeys){
+    if(cs.date<fromDate||cs.date>toDate)continue;
     if(cs.saleType!=='CashAdvance'||!cs.givenVia||cs.givenVia==='Cash')continue;
     rows.push({date:cs.date,desc:`${cs.customerName||'Customer'} — cash advance${cs.note?' · '+cs.note:''}`,type:'Cash Advance Out',ref:cs.referenceNo||'',in:0,out:cs.amount||0,createdAt:cs.createdAt});
     stats.advanceOut+=cs.amount||0;stats.totalOut+=cs.amount||0;
@@ -6486,9 +6800,9 @@ function computeDailyReportData(date){
   for(const e of expKeys){if(e&&e.date===date){expTotal+=(e.amount||0);expRows.push(e);}}
 
   // ── 4. CREDIT SALES ──
-  const csKeys=DB.listKeys('pbms_credit_sale_');
+  const csKeys=DB.listActive('pbms_credit_sale_');
   let csTotal=0; const csRows=[];
-  for(const k of csKeys){const cs=DB.get(k);if(cs&&cs.date===date){csTotal+=(cs.amount||0);csRows.push(cs);}}
+  for(const cs of csKeys){if(cs.date===date){csTotal+=(cs.amount||0);csRows.push(cs);}}
 
   // ── 5. LOAN PAYMENTS ──
   const payKeys=DB.listActive('pbms_loan_repayment_');
@@ -6506,9 +6820,8 @@ function computeDailyReportData(date){
   for(const k of depKeys){const d=DB.get(k);if(d&&d.date===date)bankDeposit+=(d.amount||0);}
 
   // ── 7. CREDIT PAYMENTS RECEIVED ──
-  const cpKeys=DB.listKeys('pbms_payment_');
   let cpTotal=0;
-  for(const k of cpKeys){const p=DB.get(k);if(p&&p.date===date)cpTotal+=(p.amount||0);}
+  for(const p of DB.listActive('pbms_payment_')){if(p.date===date)cpTotal+=(p.amount||0);}
 
   // ── 8. TOTAL PRODUCT STOCK REMAINING (as of today, independent of report date) ──
   const stockLevels=getCurrentStockLevels(s.products||[]);
@@ -7455,8 +7768,8 @@ async function generateSERegister(){
 async function generateCreditRegister(){
   const settings=APP.settings||{};
   const monthStr=document.getElementById('cr-month')?.value||fmt.today().slice(0,7);
-  const allCredits=DB.listKeys('pbms_credit_sale_').map(k=>DB.get(k)).filter(c=>c&&c.customerId);
-  const allPayments=DB.listKeys('pbms_payment_').map(k=>DB.get(k)).filter(p=>p&&p.customerId);
+  const allCredits=DB.listActive('pbms_credit_sale_').filter(c=>c.customerId);
+  const allPayments=DB.listActive('pbms_payment_').filter(p=>p.customerId);
   // Customer master data
   const custMap={};
   DB.listActive('pbms_customer_').forEach(c=>{if(c&&c.id)custMap[c.id]=c;});
@@ -8120,17 +8433,13 @@ async function buildCreditLedger(custId,from,to){
   const customers={};
   for(const c of DB.listActive('pbms_customer_')){if(c)customers[c.id]=c;}
   const entries=[];
-  const saleKeys=DB.listKeys('pbms_credit_sale_');
-  for(const k of saleKeys){
-    const s=DB.get(k);if(!s)continue;
+  for(const s of DB.listActive('pbms_credit_sale_')){
     if(s.date<from||s.date>to)continue;
     if(custId!=='all'&&s.customerId!==custId)continue;
     entries.push({date:s.date,createdAt:s.createdAt,customerId:s.customerId,customerName:customers[s.customerId]?.name||'Unknown',
       type:'Sale',ref:s.vehicleNo||'',product:s.product,quantity:s.quantity||0,debit:s.amount||0,credit:0});
   }
-  const payKeys=DB.listKeys('pbms_payment_');
-  for(const k of payKeys){
-    const p=DB.get(k);if(!p)continue;
+  for(const p of DB.listActive('pbms_payment_')){
     if(p.date<from||p.date>to)continue;
     if(custId!=='all'&&p.customerId!==custId)continue;
     entries.push({date:p.date,createdAt:p.createdAt,customerId:p.customerId,customerName:customers[p.customerId]?.name||'Unknown',
