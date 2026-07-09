@@ -1437,10 +1437,8 @@ async function getLastClosingReading(nozzleId){
   // which grouped/ordered by the random employee-id prefix first — not by time — so
   // this could return a closing reading from a completely unrelated older session.
   // Now we load sessions and sort by the actual embedded timestamp.
-  const keys=DB.listKeys('pbms_session_');
   const candidates=[];
-  for(const k of keys){
-    const s=DB.get(k);if(!s)continue;
+  for(const s of DB.listActive('pbms_session_')){
     const r=(s.assignedNozzles||[]).find(n=>n.nozzleId===nozzleId&&(n.closingReading||0)>0);
     if(r)candidates.push({ts:_sessionTimestamp(s),closing:r.closingReading});
   }
@@ -1450,9 +1448,7 @@ async function getLastClosingReading(nozzleId){
 }
 
 async function getAllSessions(){
-  const keys=DB.listKeys('pbms_session_');const sessions=[];
-  for(const k of keys){const s=DB.get(k);if(s)sessions.push(s);}
-  return sessions;
+  return DB.listActive('pbms_session_');
 }
 
 async function getCreditOutstanding(){
@@ -2071,11 +2067,39 @@ function renderSessionCard(sess,settings,idx){
       <span id="hint-${sess.id}" class="text-xs text-slate-500">${nozzles.some(n=>n.hasReadingError)?'⚠ Fix the meter reading error above before handover':nozzles.every(n=>(n.closingReading||0)>0)?'All readings complete — ready to hand over':'Enter closing readings to hand over'}</span>
       <div class="flex gap-2">
         <button onclick="downloadSessionCard('${sess.id}')" class="btn btn-ghost btn-sm text-xs">⬇ Download</button>
+        <button onclick="deleteActiveSession('${sess.id}')" class="btn btn-ghost btn-sm text-xs text-red-600">🗑 Delete Check-in</button>
         <button id="submit-btn-${sess.id}" onclick="showHandoverModal('${sess.id}')"
           class="btn btn-orange btn-sm" ${nozzles.every(n=>(n.closingReading||0)>0)&&!nozzles.some(n=>n.hasReadingError)?'':'disabled'}>Handover</button>
       </div>
     </div>
   </div>`;
+}
+
+// Cancel a mistaken check-in — wrong employee selected, wrong nozzle assigned,
+// etc. Only ever offered on the Active card (before Handover), because once a
+// shift is HandedOver or Settled it has real fuel/cash figures attached to it
+// and must go through the proper edit/audit flow instead of a quick delete.
+async function deleteActiveSession(sessId){
+  const sess=DB.getActive(`pbms_session_${sessId}`);
+  if(!sess){toast('Check-in not found','error');return;}
+  if(sess.status!=='Active'){
+    toast('Only an Active (not yet handed over) check-in can be deleted this way','error');
+    return;
+  }
+  requirePIN('Deleting a check-in requires manager approval',()=>{
+  showConfirm('Delete This Check-in',
+    `This cancels ${sess.employeeName}'s check-in on ${(sess.assignedNozzles||[]).map(n=>n.nozzleName).join(', ')||'the assigned nozzle(s)'} entirely — no fuel sale or cash has been recorded against it yet, so nothing else is affected. The employee and nozzle(s) become available again immediately for a fresh, corrected check-in. This is recorded in the audit log.`,
+    async()=>{
+      const deletedAt=new Date().toISOString();const deletedBy=APP.userEmail||'Manager';
+      DB.set(`pbms_session_${sessId}`,{...sess,deleted:true,deletedAt,deletedBy});
+      await Audit.log('session_deleted','session',sessId,{
+        employeeId:sess.employeeId,employeeName:sess.employeeName,
+        nozzles:(sess.assignedNozzles||[]).map(n=>({nozzleId:n.nozzleId,nozzleName:n.nozzleName})),
+        checkInDate:sess.checkInDate,checkInTime:sess.checkInTime});
+      toast('Check-in deleted — employee and nozzle(s) are free again','success');
+      await navigate('shift');
+    },'Delete');
+  });
 }
 
 function calcNozzle(sessId,nozzleId,opening,rate){
@@ -3329,8 +3353,7 @@ function getCurrentStockLevels(products){
     }
   }
   const purchases=DB.listActive('pbms_purchase_').filter(p=>p.date<=today);
-  const sessKeys=DB.listKeys('pbms_session_');
-  const sales=[];for(const k of sessKeys){const s=DB.get(k);if(s&&s.status==='Settled'&&s.checkInDate<=today)sales.push(s);}
+  const sales=DB.listActive('pbms_session_').filter(s=>s.status==='Settled'&&s.checkInDate<=today);
 
   const levels={};
   for(const p of products){
@@ -6716,9 +6739,8 @@ function computeDailyReportData(date){
   // settlement status. Uses `assignedNozzles`/`product` (the actual session
   // schema — the previous code read `ss.nozzles`/`n.productId`, fields that
   // don't exist on real session records, so this section always read 0).
-  const sessKeys=DB.listKeys('pbms_session_');
-  const daySessions=[]; // every shift checked in on this date, any status
-  for(const k of sessKeys){const ss=DB.get(k);if(ss&&ss.checkInDate===date)daySessions.push(ss);}
+  const allSessionsForReport=DB.listActive('pbms_session_');
+  const daySessions=allSessionsForReport.filter(ss=>ss.checkInDate===date); // every shift checked in on this date, any status
   let fuelHsd=0,fuelMs=0,fuelAmt=0;
   let pendingSettleCount=0,pendingSettleAmt=0;
   for(const ss of daySessions){
@@ -6737,16 +6759,13 @@ function computeDailyReportData(date){
   // date the cash was actually counted, so reconciliation always matches
   // the banking day. Falls back to checkOutDate/checkInDate for legacy
   // records saved before settledDate existed.
-  const settledSessions=[];
-  for(const k of sessKeys){
-    const ss=DB.get(k);
-    if(ss&&ss.status==='Settled'&&(ss.settledDate||ss.checkOutDate||ss.checkInDate)===date)settledSessions.push(ss);
-  }
-  let fuelOilCash=0,fuelOilUpi=0,fuelOilCard=0,fuelOilCredit=0,fuelOil=0,fuelDiscount=0;
+  const settledSessions=allSessionsForReport.filter(ss=>ss.status==='Settled'&&(ss.settledDate||ss.checkOutDate||ss.checkInDate)===date);
+  let fuelOilCash=0,fuelOilUpi=0,fuelOilCard=0,fuelOilCredit=0,fuelOil=0,fuelDiscount=0,totalSE=0;
   for(const ss of settledSessions){
     const col=ss.collections||{};
     fuelOilCash+=col.cashAmt||0; fuelOilUpi+=col.upiAmt||0; fuelOilCard+=col.cardAmt||0;
     fuelOilCredit+=col.creditAmt||0; fuelOil+=col.oilAmt||0; fuelDiscount+=col.discountAmt||0;
+    totalSE+=ss.shortageExcess||0;
   }
 
   // Shop (retail) sales for this date — same payment-mode logic already
@@ -6838,7 +6857,7 @@ function computeDailyReportData(date){
   const todayCashOutAll=purchasePaidTotal+loanRepayTotal+expTotal;
 
   return{date,daySessions,settledSessions,fuelHsd,fuelMs,fuelAmt,pendingSettleCount,pendingSettleAmt,
-    fuelOilCash,fuelOilUpi,fuelOilCard,fuelOilCredit,fuelOil,fuelDiscount,fuelOilNet,
+    fuelOilCash,fuelOilUpi,fuelOilCard,fuelOilCredit,fuelOil,fuelDiscount,fuelOilNet,totalSE,
     shopSalesToday,shopCash,shopUpi,shopCard,shopCredit,shopNet,
     purTotal,purRows,expTotal,expRows,csTotal,csRows,loanRepayTotal,
     bankDeposit,bankWithdraw,cpTotal,stockLevels,stockVarianceRows,stockVarianceFlagCount,stockTolerance,
@@ -6855,7 +6874,7 @@ async function loadDailyReport(){
   const dateLabel=fmt.date(date);
 
   const{daySessions,settledSessions,fuelHsd,fuelMs,fuelAmt,pendingSettleCount,pendingSettleAmt,
-    fuelOilCash,fuelOilUpi,fuelOilCard,fuelOilCredit,fuelOil,fuelDiscount,fuelOilNet,
+    fuelOilCash,fuelOilUpi,fuelOilCard,fuelOilCredit,fuelOil,fuelDiscount,fuelOilNet,totalSE,
     shopSalesToday,shopCash,shopUpi,shopCard,shopCredit,shopNet,
     purTotal,purRows,expTotal,expRows,csTotal,csRows,loanRepayTotal,
     bankDeposit,bankWithdraw,cpTotal,stockLevels,stockVarianceRows,stockVarianceFlagCount,
@@ -6926,13 +6945,14 @@ async function loadDailyReport(){
     <div class="px-4 py-1.5 text-xs text-slate-400">Reflects shifts whose cash was counted and settled on this date — may include shifts checked in on an earlier date.</div>
     ${settledSessions.length===0?`<div class="px-4 py-4 text-sm text-slate-400 text-center">No settlements recorded for ${dateLabel}</div>`:`
     <div class="overflow-x-auto"><table class="data-table text-xs">
-      <thead><tr><th>Employee</th><th>Checked in</th><th class="text-right">Oil ₹</th><th class="text-right">Cash</th><th class="text-right">UPI</th><th class="text-right">Card</th><th class="text-right">Credit</th></tr></thead>
+      <thead><tr><th>Employee</th><th>Checked in</th><th class="text-right">Oil ₹</th><th class="text-right">Cash</th><th class="text-right">UPI</th><th class="text-right">Card</th><th class="text-right">Credit</th><th class="text-right">S/E ₹</th></tr></thead>
       <tbody>
       ${settledSessions.map(ss=>{
         const c=ss.collections||{};
-        return`<tr><td>${ss.employeeName||'—'}</td><td class="text-xs text-slate-500">${fmt.date(ss.checkInDate)}</td><td class="text-right font-mono">${(c.oilAmt||0)?fmt.currency(c.oilAmt):'—'}</td><td class="text-right font-mono text-green-700">${(c.cashAmt||0)?fmt.currency(c.cashAmt):'—'}</td><td class="text-right font-mono text-green-700">${(c.upiAmt||0)?fmt.currency(c.upiAmt):'—'}</td><td class="text-right font-mono">${(c.cardAmt||0)?fmt.currency(c.cardAmt):'—'}</td><td class="text-right font-mono text-amber-600">${(c.creditAmt||0)?fmt.currency(c.creditAmt):'—'}</td></tr>`;
+        const se=ss.shortageExcess||0;
+        return`<tr><td>${ss.employeeName||'—'}</td><td class="text-xs text-slate-500">${fmt.date(ss.checkInDate)}</td><td class="text-right font-mono">${(c.oilAmt||0)?fmt.currency(c.oilAmt):'—'}</td><td class="text-right font-mono text-green-700">${(c.cashAmt||0)?fmt.currency(c.cashAmt):'—'}</td><td class="text-right font-mono text-green-700">${(c.upiAmt||0)?fmt.currency(c.upiAmt):'—'}</td><td class="text-right font-mono">${(c.cardAmt||0)?fmt.currency(c.cardAmt):'—'}</td><td class="text-right font-mono text-amber-600">${(c.creditAmt||0)?fmt.currency(c.creditAmt):'—'}</td><td class="text-right font-mono font-semibold ${se<0?'text-red-600':se>0?'text-green-700':'text-slate-400'}">${se!==0?fmt.currency(se):'—'}</td></tr>`;
       }).join('')}
-      ${shopSalesToday.length?`<tr class="bg-slate-50"><td colspan="2" class="text-slate-500 italic">🛒 Shop Sales (${shopSalesToday.length} invoice(s))</td><td class="text-right font-mono">—</td><td class="text-right font-mono text-green-700">${shopCash?fmt.currency(shopCash):'—'}</td><td class="text-right font-mono text-green-700">${shopUpi?fmt.currency(shopUpi):'—'}</td><td class="text-right font-mono">${shopCard?fmt.currency(shopCard):'—'}</td><td class="text-right font-mono text-amber-600">${shopCredit?fmt.currency(shopCredit):'—'}</td></tr>`:''}
+      ${shopSalesToday.length?`<tr class="bg-slate-50"><td colspan="2" class="text-slate-500 italic">🛒 Shop Sales (${shopSalesToday.length} invoice(s))</td><td class="text-right font-mono">—</td><td class="text-right font-mono text-green-700">${shopCash?fmt.currency(shopCash):'—'}</td><td class="text-right font-mono text-green-700">${shopUpi?fmt.currency(shopUpi):'—'}</td><td class="text-right font-mono">${shopCard?fmt.currency(shopCard):'—'}</td><td class="text-right font-mono text-amber-600">${shopCredit?fmt.currency(shopCredit):'—'}</td><td class="text-right font-mono">—</td></tr>`:''}
       <tr class="font-bold bg-slate-50 border-t-2 border-slate-300">
         <td colspan="2">TOTAL</td>
         <td class="text-right font-mono">${fuelOil?fmt.currency(fuelOil):'—'}</td>
@@ -6940,9 +6960,11 @@ async function loadDailyReport(){
         <td class="text-right font-mono text-green-700">${fmt.currency(fuelOilUpi+shopUpi)}</td>
         <td class="text-right font-mono">${fmt.currency(fuelOilCard+shopCard)}</td>
         <td class="text-right font-mono text-amber-600">${fmt.currency(fuelOilCredit+shopCredit)}</td>
+        <td class="text-right font-mono ${totalSE<0?'text-red-600':totalSE>0?'text-green-700':'text-slate-500'}">${fmt.currency(totalSE)}</td>
       </tr></tbody></table></div>`}
     <div class="px-4 py-2 border-t border-teal-100 bg-teal-50/50 flex flex-wrap items-center gap-x-6 gap-y-1 text-xs">
       <span class="text-teal-800"><b>Fuel + Oil Collected</b> (Cash+UPI+Card+Credit): <span class="font-mono font-semibold">${fmt.currency(fuelOilNet)}</span></span>
+      <span class="${totalSE<0?'text-red-600':totalSE>0?'text-green-700':'text-slate-500'}"><b>Total S/E Today:</b> <span class="font-mono font-semibold">${totalSE<0?`Shortage ${fmt.currency(-totalSE)}`:totalSE>0?`Excess ${fmt.currency(totalSE)}`:'Nil'}</span></span>
       ${fuelDiscount>0?`<span class="text-amber-700"><b>Discounts Given Today:</b> <span class="font-mono font-semibold">${fmt.currency(fuelDiscount)}</span></span>`:''}
     </div>
   </div>
@@ -6955,11 +6977,11 @@ async function loadDailyReport(){
     </div>
     ${(s.products||[]).length>0?`<div class="overflow-x-auto border-b border-slate-100">
       <table class="data-table text-xs">
-        <thead><tr><th>Product</th><th>Stock</th><th>Purchase</th><th class="text-right">Expected Close</th><th class="text-right">Actual Dip</th><th class="text-right">Variance</th></tr></thead>
+        <thead><tr><th>Product</th><th>Stock</th><th>Purchased (L)</th><th class="text-right">Expected Close</th><th class="text-right">Actual Dip</th><th class="text-right">Variance</th></tr></thead>
         <tbody>
         ${stockVarianceRows.map(r=>{
           const remaining=stockLevels[r.productId]||0;
-          return`<tr><td class="font-semibold">${r.productId}</td><td class="font-mono">${fmt.litres(remaining)}</td><td class="font-mono">${fmt.litres(r.pQty)} ${fmt.currency(purRows.filter(p=>p.product===r.productId).reduce((a,p)=>a+(p.invoiceAmount||0),0))}</td>
+          return`<tr><td class="font-semibold">${r.productId}</td><td class="font-mono">${fmt.litres(remaining)}</td><td class="font-mono">${r.pQty>0?fmt.litres(r.pQty):'—'}</td>
           <td class="text-right font-mono">${r.expectedClose!=null?fmt.litres(r.expectedClose):'—'}</td>
           <td class="text-right font-mono">${r.closeStock!=null?fmt.litres(r.closeStock):'—'}</td>
           <td class="text-right font-mono font-semibold ${r.flagged?'text-red-600':r.variance!=null?'text-green-700':'text-slate-400'}">${r.variance!=null?fmt.num(r.variance)+' L'+(r.flagged?' ⚠':''):'—'}</td></tr>`;
@@ -7066,7 +7088,7 @@ async function downloadDailyExcel(){
   // conflate the two dates in one row.
   const settleRows=settledSessions.map(ss=>{
     const col=ss.collections||{};
-    return{'Employee':ss.employeeName||'—','Checked In':ss.checkInDate||'—','Oil₹':col.oilAmt||'','Cash':col.cashAmt||'','UPI':col.upiAmt||'','Card':col.cardAmt||'','Credit':col.creditAmt||''};
+    return{'Employee':ss.employeeName||'—','Checked In':ss.checkInDate||'—','Oil₹':col.oilAmt||'','Cash':col.cashAmt||'','UPI':col.upiAmt||'','Card':col.cardAmt||'','Credit':col.creditAmt||'','S/E₹':ss.shortageExcess||0};
   });
   if(settleRows.length)XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(settleRows),'Settlements');
 
