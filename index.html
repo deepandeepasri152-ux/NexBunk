@@ -391,7 +391,7 @@ body .text-2xl,body .text-3xl,body .text-4xl{font-family:var(--font-display);}
 .tab-btn.active{color:var(--navy);border-bottom-color:var(--gold);font-weight:600;}
 .tab-btn:hover:not(.active){color:var(--ink);border-bottom-color:var(--line);}
 .data-table{width:100%;border-collapse:collapse;font-size:13px;}
-.data-table thead{background:var(--paper);position:sticky;top:0;z-index:1;}
+.data-table thead{background:var(--paper);position:sticky;top:0;z-index:1;isolation:isolate;}
 .data-table thead th{padding:10px 10px;text-align:left;font-weight:700;color:var(--muted);font-size:11px;letter-spacing:.03em;text-transform:uppercase;white-space:nowrap;}
 .data-table tbody tr{border-top:1px solid var(--line);}
 .data-table tbody tr:nth-child(even){background:#faf9f5;}
@@ -470,12 +470,30 @@ body.auth-locked{overflow:hidden;height:100vh;}
 }
 /* Modal responsive — Ledger bottom-sheet on mobile, centered modal on desktop.
    Presentational only: showModal()/closeModal() JS is untouched. */
-#modal-overlay{background:rgba(0,0,0,.5)!important;}
+#modal-overlay{background:rgba(0,0,0,.5)!important;isolation:isolate;}
+#modal-container{isolation:isolate;}
 #modal-container{width:100%;max-width:42rem;border-radius:var(--radius-card,10px);background:var(--card);box-shadow:var(--shadow-modal);}
 @media(max-width:639px){
   #modal-overlay{align-items:flex-end!important;padding:0!important;}
   #modal-container{max-width:100%!important;border-radius:16px 16px 0 0!important;max-height:90vh;overflow-y:auto;margin-bottom:0!important;}
   .form-input{font-size:16px;} /* prevent iOS zoom */
+}
+/* Wide "ledger" modals (Credit Ledger / Loan Ledger) carry 6-7 column
+   tables that don't fit the standard 42rem modal — that mismatch is what
+   was showing up as a small centered popup with the table squeezed/cut
+   off. .modal-xl (added to the modal's own root div) opts a modal into
+   extra room: wider + taller on desktop, and a true full-screen sheet on
+   tablet where there's no room to spare either. */
+#modal-container:has(.modal-xl){max-width:min(1100px,96vw);}
+@media(min-width:1024px){
+  #modal-container:has(.modal-xl){max-height:92vh;overflow-y:auto;}
+}
+@media(min-width:640px) and (max-width:1023px){
+  #modal-overlay:has(.modal-xl){padding:0!important;align-items:stretch!important;}
+  #modal-container:has(.modal-xl){
+    max-width:100vw!important;width:100vw;height:100vh;max-height:100vh;
+    border-radius:0!important;overflow-y:auto;margin:0!important;
+  }
 }
 /* Nozzle table mobile */
 @media(max-width:639px){
@@ -1317,7 +1335,14 @@ function toast(msg,type='success'){
 
 function showConfirm(title,msg,onOk,okLabel='Delete',okCls='bg-red-600 hover:bg-red-700'){
   const el=document.createElement('div');
-  el.className='fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4';
+  el.className='fixed inset-0 bg-black/60 flex items-center justify-center p-4';
+  el.style.zIndex='400'; // inline style, not a Tailwind class — this file ships a
+  // pre-generated/static Tailwind stylesheet (no live JIT compiler), so an
+  // arbitrary-value class like z-[120] has no matching CSS rule and is a
+  // silent no-op. That's exactly what broke the earlier "z-[120]" attempt:
+  // it looked right in the source but had zero effect, leaving this dialog
+  // at the default stacking level — actually BEHIND the z-110 modal it's
+  // meant to sit on top of. An inline style always applies regardless.
   el.innerHTML=`<div class="bg-white rounded-xl shadow-2xl max-w-sm w-full p-6" onclick="event.stopPropagation()">
     <h3 class="text-base font-bold text-slate-800 mb-2">${title}</h3>
     <p class="text-sm text-slate-600 mb-6 leading-relaxed">${msg}</p>
@@ -1475,7 +1500,7 @@ async function getLoanOutstanding(){
 // during that segment, then the final segment from the last repayment to asOfDate.
 function accrueLoanInterest(loan,repayments,asOfDate){
   if(!loan.interestRate||loan.interestRate<=0)return 0;
-  const reps=(repayments||[]).filter(r=>r&&r.date&&r.date<=asOfDate).slice().sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  const reps=(repayments||[]).filter(r=>r&&r.date&&r.date<=asOfDate).slice().sort((a,b)=>(a.date||'').localeCompare(b.date||'')||(a.createdAt||'').localeCompare(b.createdAt||''));
   let balance=loan.principalAmount||0,cursor=loan.startDate,interest=0;
   for(const r of reps){
     const days=fmt.daysBetween(cursor,r.date);
@@ -1501,7 +1526,7 @@ async function getCustomerBalance(custId){
   let balance=0;
   for(const s of DB.listActive('pbms_credit_sale_')){if(s.customerId===custId)balance-=s.amount||0;}
   for(const p of DB.listActive('pbms_payment_')){if(p.customerId===custId)balance+=p.amount||0;}
-  return balance;
+  return round2(balance);
 }
 
 
@@ -2969,13 +2994,13 @@ async function showStaffEditModal(empId,from,to){
   const settings=APP.settings||{};const products=(settings.products||[]).filter(p=>p.active);
   const empName=sessions[0]?.employeeName||'Employee';
   const staffRec=DB.get(`pbms_staff_${empId}`);
-  showModal(`<div class="p-6" style="max-width:800px">
+  showModal(`<div class="p-6 modal-xl">
     <div class="flex items-center justify-between mb-4">
       <div><h2 class="text-lg font-bold text-slate-800">Edit Sessions — ${empName}</h2>
         <p class="text-sm text-slate-500">${staffRec?.role||''} · ${fmt.date(from)} – ${fmt.date(to)}</p></div>
       <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 text-xl">✕</button>
     </div>
-    ${sessions.length?`<div class="overflow-x-auto" style="max-height:24rem;overflow-y:auto">
+    ${sessions.length?`<div class="overflow-x-auto" style="max-height:65vh;overflow-y:auto">
       <table class="data-table text-sm"><thead><tr>
         <th>Opening Date &amp; Time</th><th>Closing Date &amp; Time</th><th>Nozzles</th>
         ${products.map(p=>`<th class="text-right">${p.id} (L)</th>`).join('')}
@@ -3050,7 +3075,7 @@ async function showSingleSessionEdit(sessId,origin='staffreport'){
     </div>`;
   }).join('');
 
-  showModal(`<div class="p-5" style="max-width:680px">
+  showModal(`<div class="p-5 modal-xl">
     <div class="flex items-center justify-between mb-4">
       <div>
         <h2 class="text-base font-bold text-slate-800">Edit Session — ${sess.employeeName}</h2>
@@ -4417,9 +4442,10 @@ async function saveCustomer(id){
   const name=document.getElementById('cust-name')?.value?.trim();
   if(!name){toast('Enter customer name','error');return;}
   const custId=id||`CUST-${uid()}`;
+  const limitVal=document.getElementById('cust-limit')?.value;
   const cust={id:custId,name,phone:document.getElementById('cust-phone')?.value||'',
     vehicleNo:document.getElementById('cust-veh')?.value||'',
-    creditLimit:parseFloat(document.getElementById('cust-limit')?.value)||null,
+    creditLimit:limitVal===''||limitVal==null?null:parseFloat(limitVal),
     address:document.getElementById('cust-addr')?.value||''};
   DB.set(`pbms_customer_${custId}`,cust);
   await Audit.log(id?'customer_edited':'customer_added','customer',custId,{name,creditLimit:cust.creditLimit});
@@ -4437,6 +4463,7 @@ async function deleteCustomer(id){
 }
 
 async function showCreditSaleModal(custId){
+  _csLink='qty';
   const cust=DB.getActive(`pbms_customer_${custId}`);
   const settings=APP.settings||{};
   const products=(settings.products||[]).filter(p=>p.active);
@@ -4461,11 +4488,12 @@ async function showCreditSaleModal(custId){
       <div><label class="form-label">Date *</label>
         <input type="date" id="cs-date" class="form-input" value="${fmt.today()}" max="${fmt.today()}"></div>
       <div><label class="form-label">Qty (L) *</label>
-        <input type="number" id="cs-qty" class="form-input text-right font-mono" step="0.01" min="0.01" placeholder="0.00" oninput="calcCreditSaleAmt()"></div>
+        <input type="number" id="cs-qty" class="form-input text-right font-mono" step="0.01" min="0.01" placeholder="0.00" oninput="calcCreditSale('qty')"></div>
       <div><label class="form-label">Rate ₹/L</label>
-        <input type="number" id="cs-rate" class="form-input text-right font-mono" step="0.01" min="0" placeholder="0.00" value="${firstProd.rate||''}" oninput="calcCreditSaleAmt()"></div>
-      <div><label class="form-label">Amount ₹ 🔵</label>
-        <input type="text" id="cs-amt" class="auto-field form-input text-right font-mono" readonly placeholder="—"></div>
+        <input type="number" id="cs-rate" class="form-input text-right font-mono" step="0.01" min="0" placeholder="0.00" value="${firstProd.rate||''}" oninput="calcCreditSale('rate')"></div>
+      <div><label class="form-label">Amount ₹ *</label>
+        <input type="number" id="cs-amt" class="form-input text-right font-mono" step="0.01" min="0.01" placeholder="0.00" oninput="calcCreditSale('amt')"></div>
+      <div class="col-span-2 -mt-2"><p class="text-xs text-slate-400">Enter either Qty or Amount — the other fills in automatically from the Rate.</p></div>
       <div><label class="form-label">Vehicle No.</label>
         <input type="text" id="cs-veh" class="form-input" value="${cust?.vehicleNo||''}" placeholder="TN01AB1234"></div>
       <div><label class="form-label">Driver Name</label>
@@ -4508,7 +4536,7 @@ function setCSSaleType(type){
   if(!isCash){
     const products=(APP.settings?.products||[]).filter(p=>p.active);
     const prod=products.find(p=>p.id===type);
-    if(prod){const rateEl=document.getElementById('cs-rate');if(rateEl){rateEl.value=prod.rate||'';calcCreditSaleAmt();}}
+    if(prod){const rateEl=document.getElementById('cs-rate');if(rateEl){rateEl.value=prod.rate||'';calcCreditSale('rate');}}
   }
 }
 
@@ -4518,11 +4546,25 @@ function toggleAdvRef(){
   if(wrap)wrap.style.display=(via&&via!=='Cash')?'':'none';
 }
 
-function calcCreditSaleAmt(){
-  const qty=parseFloat(document.getElementById('cs-qty')?.value)||0;
-  const rate=parseFloat(document.getElementById('cs-rate')?.value)||0;
-  const el=document.getElementById('cs-amt');
-  if(el)el.value=qty>0&&rate>0?fmt.num(qty*rate):'';
+// Credit Entry's Qty and Amount fields are linked both ways: some customers
+// buy for a fixed quantity ("fill 20L"), others for a fixed amount
+// ("₹500 worth") — whichever one the person actually types into is treated
+// as the source of truth, and the other field is derived from it via Rate.
+// _csLink remembers which field was last hand-edited so a Rate change (which
+// isn't itself a source) knows which direction to recompute in.
+let _csLink='qty';
+function calcCreditSale(src){
+  if(src==='qty'||src==='amt')_csLink=src;
+  const qtyEl=document.getElementById('cs-qty'),rateEl=document.getElementById('cs-rate'),amtEl=document.getElementById('cs-amt');
+  if(!qtyEl||!rateEl||!amtEl)return;
+  const rate=parseFloat(rateEl.value)||0;
+  if(_csLink==='amt'){
+    const amt=parseFloat(amtEl.value)||0;
+    qtyEl.value=(rate>0&&amt>0)?(amt/rate).toFixed(2):'';
+  } else {
+    const qty=parseFloat(qtyEl.value)||0;
+    amtEl.value=(rate>0&&qty>0)?(qty*rate).toFixed(2):'';
+  }
 }
 
 async function saveCreditSale(custId){
@@ -4546,11 +4588,16 @@ async function saveCreditSale(custId){
   } else {
     const date=document.getElementById('cs-date')?.value;
     const product=saleType;
-    const qty=parseFloat(document.getElementById('cs-qty')?.value)||0;
     const rate=parseFloat(document.getElementById('cs-rate')?.value)||0;
-    if(!date||!product||qty<=0||rate<=0){toast('Fill all required fields','error');return;}
+    const qtyField=parseFloat(document.getElementById('cs-qty')?.value)||0;
+    const amtField=parseFloat(document.getElementById('cs-amt')?.value)||0;
+    if(!date||!product||rate<=0||(qtyField<=0&&amtField<=0)){toast('Fill all required fields','error');return;}
+    // Whichever field the person actually typed into is authoritative (avoids
+    // rounding drift from re-deriving it back through the other field).
+    const amount=_csLink==='amt'?amtField:qtyField*rate;
+    const qty=_csLink==='amt'?(rate>0?amtField/rate:0):qtyField;
     DB.set(`pbms_credit_sale_${saleId}`,{id:saleId,customerId:custId,
-      customerName:cust?.name||'',date,saleType:product,product,quantity:qty,rate,amount:qty*rate,
+      customerName:cust?.name||'',date,saleType:product,product,quantity:qty,rate,amount,
       vehicleNo:document.getElementById('cs-veh')?.value||'',
       driverName:document.getElementById('cs-driver')?.value||'',
       remarks:document.getElementById('cs-rem')?.value||'',status:'Unpaid',createdAt:new Date().toISOString()});
@@ -4620,22 +4667,22 @@ async function showCustomerLedger(custId){
       debit:s.amount||0,credit:0};
   }),
     ...payments.map(p=>({id:p.id,kind:'payment',date:p.date,createdAt:p.createdAt,type:'Payment',desc:`${p.mode} ${p.referenceNo||''}`,debit:0,credit:p.amount||0}))];
-  entries.sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  entries.sort((a,b)=>(a.date||'').localeCompare(b.date||'')||(a.createdAt||'').localeCompare(b.createdAt||''));
   let balance=0;
   // Running balance in the unified sign convention: sales (debit) push it
   // negative (Due), payments (credit) push it positive (Advance) — matches
   // getCustomerBalance exactly, so this ledger and the customer list always agree.
-  const rows=entries.map(e=>{balance+=e.credit-e.debit;return{...e,balance};});
+  const rows=entries.map(e=>{balance=round2(balance+e.credit-e.debit);return{...e,balance};});
   const typeBadge={
     'Sale':'badge-amber','Payment':'badge-green',
     'Cash Advance':'text-purple-700 bg-purple-100'
   };
-  showModal(`<div class="p-6" style="max-width:700px">
+  showModal(`<div class="p-6 modal-xl">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-lg font-bold text-slate-800">Ledger — ${cust?.name||''}</h2>
       <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600">✕</button>
     </div>
-    <div class="overflow-x-auto max-h-96 overflow-y-auto">
+    <div class="overflow-x-auto overflow-y-auto" style="max-height:65vh">
       <table class="data-table text-sm"><thead><tr><th>Date</th><th>Type</th><th>Description</th><th class="text-right">Debit ₹</th><th class="text-right">Credit ₹</th><th class="text-right">Account Balance</th><th class="no-print">Actions</th></tr></thead>
       <tbody>${rows.length?rows.map(r=>`<tr><td>${fmt.date(r.date)}<div class="text-xs text-slate-400">${fmt.timeOf(r.createdAt)}</div></td>
         <td><span class="badge ${typeBadge[r.type]||'badge-gray'} text-xs">${r.type}</span></td>
@@ -4661,6 +4708,7 @@ async function showCustomerLedger(custId){
 // short of manually poking IndexedDB. These close the gap, with a required
 // edit reason and full audit trail, matching the loan repayment fix above.
 async function editCreditSale(saleId,custId){
+  _cesLink='qty';
   const sale=DB.getActive(`pbms_credit_sale_${saleId}`);
   if(!sale){toast('Entry not found','error');return;}
   const isCashAdv=sale.saleType==='CashAdvance';
@@ -4685,9 +4733,10 @@ async function editCreditSale(saleId,custId){
     </div>`:`
     <div class="grid grid-cols-2 gap-4">
       <div><label class="form-label">Date *</label><input type="date" id="ces-date" class="form-input" value="${sale.date||''}" max="${fmt.today()}"></div>
-      <div><label class="form-label">Qty (L) *</label><input type="number" id="ces-qty" class="form-input text-right font-mono" step="0.01" min="0.01" value="${sale.quantity||''}" oninput="calcEditCreditSaleAmt()"></div>
-      <div><label class="form-label">Rate ₹/L</label><input type="number" id="ces-rate" class="form-input text-right font-mono" step="0.01" min="0" value="${sale.rate||''}" oninput="calcEditCreditSaleAmt()"></div>
-      <div><label class="form-label">Amount ₹ 🔵</label><input type="text" id="ces-amt-display" class="auto-field form-input text-right font-mono" readonly value="${sale.amount?fmt.num(sale.amount):''}"></div>
+      <div><label class="form-label">Qty (L) *</label><input type="number" id="ces-qty" class="form-input text-right font-mono" step="0.01" min="0.01" value="${sale.quantity||''}" oninput="calcEditCreditSale('qty')"></div>
+      <div><label class="form-label">Rate ₹/L</label><input type="number" id="ces-rate" class="form-input text-right font-mono" step="0.01" min="0" value="${sale.rate||''}" oninput="calcEditCreditSale('rate')"></div>
+      <div><label class="form-label">Amount ₹ *</label><input type="number" id="ces-amt-display" class="form-input text-right font-mono" step="0.01" min="0.01" value="${sale.amount||''}" oninput="calcEditCreditSale('amt')"></div>
+      <div class="col-span-2 -mt-2"><p class="text-xs text-slate-400">Enter either Qty or Amount — the other fills in automatically from the Rate.</p></div>
       <div><label class="form-label">Vehicle No.</label><input type="text" id="ces-veh" class="form-input" value="${esc(sale.vehicleNo)}"></div>
       <div><label class="form-label">Driver Name</label><input type="text" id="ces-driver" class="form-input" value="${esc(sale.driverName)}"></div>
       <div class="col-span-2"><label class="form-label">Remarks</label><input type="text" id="ces-rem" class="form-input" value="${esc(sale.remarks)}"></div>
@@ -4703,11 +4752,19 @@ async function editCreditSale(saleId,custId){
   </div>`,()=>showCustomerLedger(custId));
 }
 
-function calcEditCreditSaleAmt(){
-  const qty=parseFloat(document.getElementById('ces-qty')?.value)||0;
-  const rate=parseFloat(document.getElementById('ces-rate')?.value)||0;
-  const el=document.getElementById('ces-amt-display');
-  if(el)el.value=qty>0&&rate>0?fmt.num(qty*rate):'';
+let _cesLink='qty';
+function calcEditCreditSale(src){
+  if(src==='qty'||src==='amt')_cesLink=src;
+  const qtyEl=document.getElementById('ces-qty'),rateEl=document.getElementById('ces-rate'),amtEl=document.getElementById('ces-amt-display');
+  if(!qtyEl||!rateEl||!amtEl)return;
+  const rate=parseFloat(rateEl.value)||0;
+  if(_cesLink==='amt'){
+    const amt=parseFloat(amtEl.value)||0;
+    qtyEl.value=(rate>0&&amt>0)?(amt/rate).toFixed(2):'';
+  } else {
+    const qty=parseFloat(qtyEl.value)||0;
+    amtEl.value=(rate>0&&qty>0)?(qty*rate).toFixed(2):'';
+  }
 }
 
 async function saveCreditSaleEdit(saleId,custId,isCashAdv){
@@ -4724,10 +4781,13 @@ async function saveCreditSaleEdit(saleId,custId,isCashAdv){
     if(amt<=0){toast('Enter a valid amount','error');return;}
     after={date,amount:amt,givenVia:document.getElementById('ces-via')?.value||'Cash',referenceNo:document.getElementById('ces-ref')?.value||'',note:document.getElementById('ces-note')?.value||''};
   } else {
-    const qty=parseFloat(document.getElementById('ces-qty')?.value)||0;
     const rate=parseFloat(document.getElementById('ces-rate')?.value)||0;
-    if(qty<=0||rate<=0){toast('Enter valid quantity and rate','error');return;}
-    after={date,quantity:qty,rate,amount:qty*rate,
+    const qtyField=parseFloat(document.getElementById('ces-qty')?.value)||0;
+    const amtField=parseFloat(document.getElementById('ces-amt-display')?.value)||0;
+    if(rate<=0||(qtyField<=0&&amtField<=0)){toast('Enter a valid quantity/amount and rate','error');return;}
+    const amount=_cesLink==='amt'?amtField:qtyField*rate;
+    const qty=_cesLink==='amt'?(rate>0?amtField/rate:0):qtyField;
+    after={date,quantity:qty,rate,amount,
       vehicleNo:document.getElementById('ces-veh')?.value||'',
       driverName:document.getElementById('ces-driver')?.value||'',
       remarks:document.getElementById('ces-rem')?.value||''};
@@ -4848,7 +4908,7 @@ async function renderLoanManagement(el){
   function getOutstanding(loan){
     const reps=repByLoan[loan.id]||[];
     const repaid=reps.reduce((s,r)=>s+(r.amount||0),0);
-    return Math.max(0,(loan.principalAmount||0)-repaid);
+    return Math.max(0,round2((loan.principalAmount||0)-repaid));
   }
 
   // Summary totals
@@ -4904,7 +4964,7 @@ async function renderLoanManagement(el){
     ${loans.map(l=>{
       const reps=repByLoan[l.id]||[];
       const repaid=reps.reduce((s,r)=>s+(r.amount||0),0);
-      const out=Math.max(0,(l.principalAmount||0)-repaid);
+      const out=Math.max(0,round2((l.principalAmount||0)-repaid));
       const pct=l.principalAmount?Math.min(100,Math.round((repaid/l.principalAmount)*100)):0;
       const interest=calcAccruedInterest(l);
       const statusCls=out<=0?'badge-green':pct>0?'badge-amber':'badge-red';
@@ -4999,7 +5059,7 @@ async function saveLoan(existingId,force){
     if(dupe){
       const repKeys=DB.listActive('pbms_loan_repayment_');
       let repaid=0;for(const r of repKeys){if(r?.loanId===dupe.id)repaid+=(r.amount||0);}
-      const out=Math.max(0,(dupe.principalAmount||0)-repaid);
+      const out=Math.max(0,round2((dupe.principalAmount||0)-repaid));
       showConfirm('Lender Already Has A Loan On Record',
         `${lender} already has a loan of ${fmt.currency(dupe.principalAmount||0)} dated ${fmt.date(dupe.startDate)}${out>0?` (${fmt.currency(out)} still outstanding)`:' (already fully repaid)'}. Adding this will create a SEPARATE loan account for the same lender — not add to the existing one. If this is meant to be a repayment or a top-up on the existing loan, cancel this and use "+ Repay" or "Edit" on that loan instead. Continue and create a new, separate loan anyway?`,
         ()=>saveLoan(existingId,true),'Create Separate Loan','bg-amber-600 hover:bg-amber-700');
@@ -5043,7 +5103,7 @@ async function showRepaymentModal(loanId){
   const rKeys=DB.listActive('pbms_loan_repayment_');
   let totalRepaid=0;
   for(const r of rKeys){if(r?.loanId===loanId)totalRepaid+=(r.amount||0);}
-  const outstanding=Math.max(0,(loan.principalAmount||0)-totalRepaid);
+  const outstanding=Math.max(0,round2((loan.principalAmount||0)-totalRepaid));
 
   if(outstanding<=0){toast('This loan is already fully repaid','info');return;}
 
@@ -5112,7 +5172,7 @@ async function saveRepayment(loanId){
   const rKeys=DB.listActive('pbms_loan_repayment_');
   let totalRepaid=0;
   for(const r of rKeys){if(r?.loanId===loanId)totalRepaid+=(r.amount||0);}
-  const outstanding=Math.max(0,(loan?.principalAmount||0)-totalRepaid);
+  const outstanding=Math.max(0,round2((loan?.principalAmount||0)-totalRepaid));
   if(amt>outstanding+0.01){
     toast(`Amount ₹${amt.toFixed(2)} exceeds outstanding ₹${outstanding.toFixed(2)}`,'error');return;
   }
@@ -5140,11 +5200,11 @@ async function showLoanLedger(loanId){
   const rKeys=DB.listActive('pbms_loan_repayment_');
   const repayments=[];
   for(const r of rKeys){if(r?.loanId===loanId)repayments.push(r);}
-  repayments.sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  repayments.sort((a,b)=>(a.date||'').localeCompare(b.date||'')||(a.createdAt||'').localeCompare(b.createdAt||''));
 
   const principal=loan.principalAmount||0;
   const totalRepaid=repayments.reduce((s,r)=>s+(r.amount||0),0);
-  const outstanding=Math.max(0,principal-totalRepaid);
+  const outstanding=Math.max(0,round2(principal-totalRepaid));
 
   // Accrued interest — computed piecewise across the actual repayment timeline (see accrueLoanInterest)
   const today=fmt.today();
@@ -5155,11 +5215,11 @@ async function showLoanLedger(loanId){
   let balance=principal;
   const rows=[{id:null,date:loan.startDate,createdAt:loan.createdAt,type:'Loan Taken',desc:`Principal from ${loan.lenderName}${loan.purpose?' · '+loan.purpose:''}`,debit:principal,credit:0,balance}];
   repayments.forEach(r=>{
-    balance-=(r.amount||0);
+    balance=round2(balance-(r.amount||0));
     rows.push({id:r.id,date:r.date,createdAt:r.createdAt,type:'Repayment',desc:`${r.mode||'Cash'}${r.referenceNo?' · '+r.referenceNo:''}${r.remarks?' — '+r.remarks:''}`,debit:0,credit:r.amount||0,balance:Math.max(0,balance)});
   });
 
-  showModal(`<div class="p-5" style="min-width:min(760px,90vw)">
+  showModal(`<div class="p-5 modal-xl">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-lg font-bold text-slate-800">Loan Ledger — ${loan.lenderName}</h2>
       <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">✕</button>
@@ -5186,7 +5246,7 @@ async function showLoanLedger(loanId){
     </div>
 
     <!-- Transactions -->
-    <div class="overflow-x-auto max-h-80 overflow-y-auto rounded-lg border border-slate-100">
+    <div class="overflow-x-auto overflow-y-auto rounded-lg border border-slate-100" style="max-height:50vh">
       <table class="data-table text-sm">
         <thead><tr>
           <th>Date</th><th>Type</th><th>Description</th>
@@ -5239,7 +5299,7 @@ async function editRepayment(repId,loanId){
   const rKeys=DB.listActive('pbms_loan_repayment_');
   let totalRepaidExcl=0;
   for(const r of rKeys){if(r?.loanId===loanId&&r.id!==repId)totalRepaidExcl+=(r.amount||0);}
-  const maxAllowed=Math.max(0,(loan.principalAmount||0)-totalRepaidExcl);
+  const maxAllowed=Math.max(0,round2((loan.principalAmount||0)-totalRepaidExcl));
   const editCount=(rep.editHistory||[]).length;
   showModal(`<div class="p-6">
     <div class="flex items-center justify-between mb-5">
@@ -5291,7 +5351,7 @@ async function saveRepaymentEdit(repId,loanId){
   const rKeys=DB.listActive('pbms_loan_repayment_');
   let totalRepaidExcl=0;
   for(const r of rKeys){if(r?.loanId===loanId&&r.id!==repId)totalRepaidExcl+=(r.amount||0);}
-  const maxAllowed=Math.max(0,(loan?.principalAmount||0)-totalRepaidExcl);
+  const maxAllowed=Math.max(0,round2((loan?.principalAmount||0)-totalRepaidExcl));
   if(amt>maxAllowed+0.01){
     toast(`Amount ₹${amt.toFixed(2)} exceeds outstanding ₹${maxAllowed.toFixed(2)}`,'error');return;
   }
@@ -5550,6 +5610,15 @@ async function loadSettlementForDate(date){
   // even for a date whose settlement was already saved earlier.
   const isOverridden=!!(saved&&saved.expManualOverride);
   const cashExpenses=isOverridden?(saved.cashExpenses??0):autoCashExp;
+  // If cash expenses run higher than cash actually collected today (a big
+  // cash purchase or advance can easily outrun the till), the shortfall
+  // doesn't block settlement anymore — it's covered by a withdrawal from the
+  // bank, same as an owner pulling extra cash to top up the drawer. Net cash
+  // deposited to the bank can never go negative; the shortfall is tracked
+  // separately and posted as an outflow in the Bank Book.
+  const netCashCollected=cashCollection-cashExpenses;
+  const cashDepositToBank=Math.max(netCashCollected,0);
+  const bankShortfall=Math.max(-netCashCollected,0);
   const noSessions=sessions.length===0;
   const noCollections=noSessions&&shopSalesToday.length===0&&creditRecoveryCash===0;
 
@@ -5629,7 +5698,7 @@ async function loadSettlementForDate(date){
           <span>Total Auto-filled</span><span class="font-mono">${fmt.currency(autoCashExp)}</span>
         </div>
       </div>`:''}
-      <div id="settl-exp-err" class="mt-2 text-red-600 text-xs hidden">⚠ Cash expenses cannot exceed cash collected.</div>
+      <div id="settl-exp-err" class="mt-2 text-amber-700 text-xs hidden">⚠ Cash expenses exceed cash collected today — the difference will be withdrawn from the Bank Book to cover the shortfall.</div>
     </div>
   </div>
 
@@ -5649,11 +5718,15 @@ async function loadSettlementForDate(date){
       </div>
       <div class="flex items-center justify-between px-4 py-3 bg-blue-50 font-semibold border-t-2 border-blue-200">
         <span class="text-blue-700">Net Cash Collected</span>
-        <span id="settl-net" class="font-mono text-blue-700">${fmt.currency(cashCollection-cashExpenses)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
+        <span id="settl-net" class="font-mono ${netCashCollected<0?'text-red-600':'text-blue-700'}">${netCashCollected<0?'−':''}${fmt.currency(Math.abs(netCashCollected))} <span class="text-xs font-normal text-slate-400">🔵</span></span>
       </div>
       <div class="flex items-center justify-between px-4 py-2.5 text-slate-500">
-        <span>Cash Deposit to Bank <span class="text-xs text-slate-400">(= Net Cash Collected)</span></span>
-        <span id="settl-deposit" class="font-mono font-semibold text-slate-700">${fmt.currency(cashCollection-cashExpenses)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
+        <span>Cash Deposit to Bank <span class="text-xs text-slate-400">(= Net Cash Collected, floor ₹0)</span></span>
+        <span id="settl-deposit" class="font-mono font-semibold text-slate-700">${fmt.currency(cashDepositToBank)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
+      </div>
+      <div class="flex items-center justify-between px-4 py-2.5 text-red-600" id="settl-shortfall-row" ${bankShortfall>0?'':'style="display:none"'}>
+        <span>Bank Withdrawal <span class="text-xs text-slate-400">(cash expenses exceeded collection)</span></span>
+        <span id="settl-shortfall" class="font-mono font-semibold">− ${fmt.currency(bankShortfall)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
       </div>
     </div>
   </div>
@@ -5661,12 +5734,12 @@ async function loadSettlementForDate(date){
   <!-- SECTION D: What goes to bank -->
   <div class="card overflow-hidden mb-5">
     <div class="px-4 py-3 border-b border-slate-100 bg-green-50">
-      <h2 class="font-semibold text-green-700 text-sm">Today's Bank Inflows</h2>
+      <h2 class="font-semibold text-green-700 text-sm">Today's Bank Movement</h2>
     </div>
     <div class="divide-y divide-slate-100 text-sm">
       <div class="flex items-center justify-between px-4 py-2.5 text-slate-500">
         <span>Cash Deposit</span>
-        <span id="bank-cash-dep" class="font-mono font-semibold">${fmt.currency(cashCollection-cashExpenses)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
+        <span id="bank-cash-dep" class="font-mono font-semibold">${fmt.currency(cashDepositToBank)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
       </div>
       <div class="flex items-center justify-between px-4 py-2.5 text-indigo-600">
         <span>UPI (direct to bank)</span>
@@ -5676,9 +5749,13 @@ async function loadSettlementForDate(date){
         <span>Card (direct to bank)</span>
         <span class="font-mono font-semibold">${fmt.currency(cardCollection)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
       </div>
+      <div class="flex items-center justify-between px-4 py-2.5 text-red-600" id="bank-shortfall-row" ${bankShortfall>0?'':'style="display:none"'}>
+        <span>Withdrawal (cash expense shortfall)</span>
+        <span id="bank-shortfall-line" class="font-mono font-semibold">− ${fmt.currency(bankShortfall)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
+      </div>
       <div class="flex items-center justify-between px-4 py-3 bg-green-50 font-bold border-t-2 border-green-200">
-        <span class="text-green-700">Total Bank Inflow Today</span>
-        <span id="bank-total-inflow" class="font-mono text-green-700">${fmt.currency(cashCollection-cashExpenses+upiCollection+cardCollection)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
+        <span class="text-green-700">Net Bank Movement Today</span>
+        <span id="bank-total-inflow" class="font-mono ${(cashDepositToBank+upiCollection+cardCollection-bankShortfall)<0?'text-red-600':'text-green-700'}">${fmt.currency(cashDepositToBank+upiCollection+cardCollection-bankShortfall)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
       </div>
     </div>
   </div>
@@ -5729,16 +5806,26 @@ async function resetSettlExpAuto(date){
 function calcSettlement(cashColl,upiColl,cardColl){
   const exp=parseFloat(document.getElementById('settl-exp')?.value)||0;
   const net=cashColl-exp;
+  const deposit=Math.max(net,0);
+  const shortfall=Math.max(-net,0);
   const errEl=document.getElementById('settl-exp-err');
-  const invalid=exp>cashColl;
-  if(errEl)errEl.classList.toggle('hidden',!invalid);
+  if(errEl)errEl.classList.toggle('hidden',shortfall<=0);
   const s=id=>document.getElementById(id);
   if(s('settl-exp-display'))s('settl-exp-display').textContent=fmt.currency(exp);
-  if(s('settl-net'))s('settl-net').innerHTML=`${fmt.currency(Math.max(net,0))} <span class="text-xs font-normal text-slate-400">🔵</span>`;
-  if(s('settl-deposit'))s('settl-deposit').innerHTML=`${fmt.currency(Math.max(net,0))} <span class="text-xs font-normal text-slate-400">🔵</span>`;
-  if(s('bank-cash-dep'))s('bank-cash-dep').innerHTML=`${fmt.currency(Math.max(net,0))} <span class="text-xs font-normal text-slate-400">🔵</span>`;
-  const totalInflow=Math.max(net,0)+upiColl+cardColl;
-  if(s('bank-total-inflow'))s('bank-total-inflow').innerHTML=`${fmt.currency(totalInflow)} <span class="text-xs font-normal text-slate-400">🔵</span>`;
+  if(s('settl-net'))s('settl-net').innerHTML=`${net<0?'−':''}${fmt.currency(Math.abs(net))} <span class="text-xs font-normal text-slate-400">🔵</span>`;
+  if(s('settl-net'))s('settl-net').className=`font-mono ${net<0?'text-red-600':'text-blue-700'}`;
+  if(s('settl-deposit'))s('settl-deposit').innerHTML=`${fmt.currency(deposit)} <span class="text-xs font-normal text-slate-400">🔵</span>`;
+  if(s('bank-cash-dep'))s('bank-cash-dep').innerHTML=`${fmt.currency(deposit)} <span class="text-xs font-normal text-slate-400">🔵</span>`;
+  const shortfallHtml=`− ${fmt.currency(shortfall)} <span class="text-xs font-normal text-slate-400">🔵</span>`;
+  if(s('settl-shortfall-row'))s('settl-shortfall-row').style.display=shortfall>0?'':'none';
+  if(s('settl-shortfall'))s('settl-shortfall').innerHTML=shortfallHtml;
+  if(s('bank-shortfall-row'))s('bank-shortfall-row').style.display=shortfall>0?'':'none';
+  if(s('bank-shortfall-line'))s('bank-shortfall-line').innerHTML=shortfallHtml;
+  const netMovement=deposit+upiColl+cardColl-shortfall;
+  if(s('bank-total-inflow')){
+    s('bank-total-inflow').innerHTML=`${fmt.currency(netMovement)} <span class="text-xs font-normal text-slate-400">🔵</span>`;
+    s('bank-total-inflow').className=`font-mono ${netMovement<0?'text-red-600':'text-green-700'}`;
+  }
 }
 
 async function saveSettlement(date){
@@ -5750,17 +5837,25 @@ async function saveSettlement(date){
   const cashExpenses   =parseFloat(document.getElementById('settl-exp')?.value)||0;
   const expManualOverride=document.getElementById('settl-exp')?.dataset.override==='true';
 
-  if(cashExpenses>cashCollection){toast('Cash expenses cannot exceed cash collected','error');return;}
-
   const netCashCollected=cashCollection-cashExpenses;
-  const cashDepositToBank=netCashCollected;
-  const totalBankInflowToday=cashDepositToBank+upiCollection+cardCollection;
+  const cashDepositToBank=Math.max(netCashCollected,0);
+  const bankShortfall=Math.max(-netCashCollected,0);
+  // Cash expenses exceeding cash collected no longer blocks settlement — it
+  // just means today's expenses were partly funded by pulling extra cash
+  // from the bank rather than from the till. Confirm before saving so it's
+  // never silent, since it's an unusual day worth double-checking.
+  if(bankShortfall>0){
+    if(!confirm(`Cash expenses (${fmt.currency(cashExpenses)}) exceed cash collected (${fmt.currency(cashCollection)}) by ${fmt.currency(bankShortfall)}.\n\nThis will be recorded as a ${fmt.currency(bankShortfall)} withdrawal from the Bank Book to cover the shortfall. Continue?`))return;
+  }
+  const totalBankInflowToday=cashDepositToBank+upiCollection+cardCollection-bankShortfall;
   DB.set(`pbms_daily_settlement_${date}`,{
     date,cashCollection,upiCollection,cardCollection,creditSales,totalCollected,
-    cashExpenses,expManualOverride,netCashCollected,cashDepositToBank,totalBankInflowToday
+    cashExpenses,expManualOverride,netCashCollected,cashDepositToBank,bankShortfall,totalBankInflowToday
   });
 
-  toast(`Settlement saved. Bank credited ${fmt.currency(totalBankInflowToday)}.`,'success');
+  toast(bankShortfall>0
+    ?`Settlement saved. Bank net change ${fmt.currency(totalBankInflowToday)} (₹${fmt.currency(bankShortfall)} withdrawn to cover shortfall).`
+    :`Settlement saved. Bank credited ${fmt.currency(totalBankInflowToday)}.`,'success');
   await loadSettlementForDate(date);
 }
 
@@ -5991,7 +6086,7 @@ async function loadBankBook(){
 
 async function buildBankBook(fromDate,toDate){
   const rows=[];
-  const stats={openingBalance:0,totalIn:0,totalOut:0,cashDep:0,upi:0,card:0,credit:0,loanIn:0,fuelOut:0,loanOut:0,advanceOut:0,expOut:0,incentiveDueIn:0,oilOut:0,shopIn:0,shopOut:0};
+  const stats={openingBalance:0,totalIn:0,totalOut:0,cashDep:0,upi:0,card:0,credit:0,loanIn:0,fuelOut:0,loanOut:0,advanceOut:0,expOut:0,incentiveDueIn:0,oilOut:0,shopIn:0,shopOut:0,settlementShortfallOut:0};
 
   // ── Pre-load all reference data in single passes (no N+1) ──
   const custMap={};for(const c of DB.listActive('pbms_customer_')){if(c)custMap[c.id]=c;}
@@ -6020,6 +6115,10 @@ async function buildBankBook(fromDate,toDate){
     if((s.cardCollection||0)>0){
       rows.push({date:s.date,desc:'Card collections',type:'Card',ref:'',in:s.cardCollection,out:0,createdAt:s.createdAt});
       stats.card+=s.cardCollection;stats.totalIn+=s.cardCollection;
+    }
+    if((s.bankShortfall||0)>0){
+      rows.push({date:s.date,desc:'Cash withdrawn — cash expenses exceeded collection',type:'Cash Withdrawal',ref:'',in:0,out:s.bankShortfall,createdAt:s.createdAt});
+      stats.settlementShortfallOut+=s.bankShortfall;stats.totalOut+=s.bankShortfall;
     }
   }
 
@@ -8157,7 +8256,7 @@ async function buildLoanLedger(from,to){
   const allRepByLoan={};
   const repaymentsAll=DB.listActive('pbms_loan_repayment_');
   for(const r of repaymentsAll){if(!r)continue;if(!allRepByLoan[r.loanId])allRepByLoan[r.loanId]=0;allRepByLoan[r.loanId]+=(r.amount||0);}
-  const totalOutstanding=Object.values(loans).reduce((s,l)=>s+Math.max(0,(l.principalAmount||0)-(allRepByLoan[l.id]||0)),0);
+  const totalOutstanding=Object.values(loans).reduce((s,l)=>s+Math.max(0,round2((l.principalAmount||0)-(allRepByLoan[l.id]||0))),0);
 
   // Build merged chronological entries within the date range
   const entries=[];
@@ -8454,22 +8553,44 @@ async function applyCreditsFilter(){
 async function buildCreditLedger(custId,from,to){
   const customers={};
   for(const c of DB.listActive('pbms_customer_')){if(c)customers[c.id]=c;}
+  const allSales=DB.listActive('pbms_credit_sale_');
+  const allPayments=DB.listActive('pbms_payment_');
+
+  // Opening balance per customer — net of every sale/payment strictly BEFORE
+  // the filter's "from" date. Without this, filtering to e.g. "this month"
+  // reset everyone's running Balance to 0 at the start of the window, so a
+  // customer who has owed ₹50,000 for months would show as "Balance: ₹0" or
+  // whatever they moved this month — a filtered view that silently disagreed
+  // with the real Customer Ledger (which always looks at the full history).
+  const openingBalance={};
+  for(const s of allSales){
+    if(custId!=='all'&&s.customerId!==custId)continue;
+    if(!(s.date<from))continue;
+    openingBalance[s.customerId]=(openingBalance[s.customerId]||0)+(s.amount||0);
+  }
+  for(const p of allPayments){
+    if(custId!=='all'&&p.customerId!==custId)continue;
+    if(!(p.date<from))continue;
+    openingBalance[p.customerId]=(openingBalance[p.customerId]||0)-(p.amount||0);
+  }
+
   const entries=[];
-  for(const s of DB.listActive('pbms_credit_sale_')){
+  for(const s of allSales){
     if(s.date<from||s.date>to)continue;
     if(custId!=='all'&&s.customerId!==custId)continue;
     entries.push({date:s.date,createdAt:s.createdAt,customerId:s.customerId,customerName:customers[s.customerId]?.name||'Unknown',
       type:'Sale',ref:s.vehicleNo||'',product:s.product,quantity:s.quantity||0,debit:s.amount||0,credit:0});
   }
-  for(const p of DB.listActive('pbms_payment_')){
+  for(const p of allPayments){
     if(p.date<from||p.date>to)continue;
     if(custId!=='all'&&p.customerId!==custId)continue;
     entries.push({date:p.date,createdAt:p.createdAt,customerId:p.customerId,customerName:customers[p.customerId]?.name||'Unknown',
       type:'Payment',ref:p.referenceNo||p.mode||'',product:'',quantity:0,debit:0,credit:p.amount||0});
   }
   entries.sort((a,b)=>(a.date||'').localeCompare(b.date||'')||(a.type==='Sale'?1:-1));
-  const custBal={};
-  entries.forEach(e=>{if(!custBal[e.customerId])custBal[e.customerId]=0;custBal[e.customerId]+=e.debit-e.credit;e.balance=custBal[e.customerId];});
+  const custBal={...openingBalance};
+  entries.forEach(e=>{if(custBal[e.customerId]==null)custBal[e.customerId]=0;custBal[e.customerId]=round2(custBal[e.customerId]+e.debit-e.credit);e.balance=custBal[e.customerId];});
+
   return{entries,customers};
 }
 
@@ -8487,6 +8608,13 @@ function renderLedgerView(el,entries,page){
   const pageRows=entries.slice(start,start+LEDGER_PAGE_SIZE);
   const totDebit =entries.reduce((s,e)=>s+e.debit, 0);
   const totCredit=entries.reduce((s,e)=>s+e.credit,0);
+  // Closing balance = each shown customer's actual account balance as of "to"
+  // (their last row's running balance, which now carries pre-period history —
+  // see buildCreditLedger). This is NOT the same as totDebit-totCredit, which
+  // is only the movement inside the selected date range.
+  const closingByCust={};
+  entries.forEach(e=>{closingByCust[e.customerId]=e.balance;});
+  const totalClosing=Object.values(closingByCust).reduce((s,v)=>s+v,0);
   const paginator=totalPages>1?`
     <div class="flex items-center justify-between px-4 py-3 border-t border-slate-100 text-sm flex-wrap gap-2">
       <span class="text-slate-500">Showing ${start+1}–${Math.min(start+LEDGER_PAGE_SIZE,entries.length)} of ${entries.length} transactions</span>
@@ -8517,13 +8645,13 @@ function renderLedgerView(el,entries,page){
       <td colspan="6">TOTAL (all ${entries.length} rows)</td>
       <td class="text-right font-mono text-red-600">${fmt.currency(totDebit)}</td>
       <td class="text-right font-mono text-green-700">${fmt.currency(totCredit)}</td>
-      <td class="text-right font-mono ${(totDebit-totCredit)>0?'text-red-600':''}">${fmt.currency(totDebit-totCredit)}</td>
+      <td class="text-right font-mono ${totalClosing>0?'text-red-600':''}">${fmt.currency(totalClosing)}</td>
     </tr></tbody></table></div>
     ${paginator}
     <div class="px-4 py-3 border-t border-slate-100 flex flex-wrap gap-4 text-sm">
-      <span class="text-slate-500">Total Sales: <strong class="text-red-600">${fmt.currency(totDebit)}</strong></span>
-      <span class="text-slate-500">Total Received: <strong class="text-green-700">${fmt.currency(totCredit)}</strong></span>
-      <span class="text-slate-500">Net Outstanding: <strong class="${(totDebit-totCredit)>0?'text-red-600':'text-green-700'}">${fmt.currency(totDebit-totCredit)}</strong></span>
+      <span class="text-slate-500">Total Sales (this period): <strong class="text-red-600">${fmt.currency(totDebit)}</strong></span>
+      <span class="text-slate-500">Total Received (this period): <strong class="text-green-700">${fmt.currency(totCredit)}</strong></span>
+      <span class="text-slate-500">Closing Balance (customers shown, full history): <strong class="${totalClosing>0?'text-red-600':'text-green-700'}">${fmt.currency(totalClosing)}</strong></span>
     </div>
   </div>`;
 }
