@@ -1392,15 +1392,12 @@ async function getSalesForMonth(year,month){
     if(s.status!=='Settled'){slot.pendingCount++;slot.pendingAmt+=s.calcSales||0;}
   }
 
-  // ── CASH COLLECTED & SETTLED — by settlement date, not check-in date.
-  // Queried via the status index rather than the checkInDate range, since
-  // a shift settled in this month may have checked in a different month
-  // (or vice versa) — it must be counted on the day the cash was actually
-  // reconciled, matching the Daily Report's settlement-date logic exactly.
+  // ── CASH COLLECTED & SETTLED — by the shift's opening (check-in) date,
+  // matching the Daily Report's logic exactly (see computeDailyReportData).
   const settledRows=await dbFindByIndex('sessions','status','Settled');
   for(const row of settledRows){
     const s=row;
-    const settleDate=s.settledDate||s.checkOutDate||s.checkInDate;
+    const settleDate=s.checkInDate;
     if(!settleDate||!settleDate.startsWith(monthStr))continue;
     const slot=result[settleDate];if(!slot)continue;
     slot.cashAmt+=s.collections?.cashAmt||0;
@@ -5545,80 +5542,12 @@ async function loadSettlementForDate(date){
 
   // Load existing settlement (if already saved)
   const saved=DB.get(`pbms_daily_settlement_${date}`);
-  // Auto-sum cash expenses from pbms_expense_* for this date
-  const expKeys2=DB.listActive('pbms_expense_');
-  const cashExpItems=[];let autoCashExp=0;
-  for(const e of expKeys2){
-    if(!e||e.date!==date)continue;
-    if(!e.mode||e.mode==='Cash'){cashExpItems.push({...e,_src:'expense'});autoCashExp+=e.amount||0;}
-  }
-  // Also include Cash Advances given via Cash for this date
-  const caKeys=DB.listActive('pbms_credit_sale_');
-  for(const cs of caKeys){
-    if(cs.date!==date||cs.saleType!=='CashAdvance')continue;
-    if(!cs.givenVia||cs.givenVia==='Cash'){
-      cashExpItems.push({description:`${cs.customerName||'Customer'} — Cash Advance`,
-        category:'Cash Advance',amount:cs.amount||0,_src:'advance'});
-      autoCashExp+=cs.amount||0;
-    }
-  }
-  // Fuel purchases paid in Cash (dated by the actual paidDate, not the invoice
-  // date) — otherwise a cash fuel payment silently vanishes from both this
-  // settlement and the Bank Book, overstating cash available to deposit.
-  const purKeys2=DB.listActive('pbms_purchase_');
-  for(const p of purKeys2){
-    if(!p||p.paymentStatus!=='Paid')continue;
-    const payDate=p.paidDate||p.date;
-    if(payDate!==date||(p.mode||'Bank Transfer')!=='Cash')continue;
-    cashExpItems.push({description:`${p.supplierName||'Supplier'} — Fuel Purchase (${p.product||''})`,
-      category:'Fuel Purchase (Cash)',amount:p.invoiceAmount||0,_src:'fuelpurchase'});
-    autoCashExp+=p.invoiceAmount||0;
-  }
-  // Loan repayments made in Cash
-  const repKeys2=DB.listActive('pbms_loan_repayment_');
-  for(const r of repKeys2){
-    if(!r||r.date!==date||r.mode!=='Cash')continue;
-    cashExpItems.push({description:`${r.lenderName||'Lender'} — Loan Repayment`,
-      category:'Loan Repayment (Cash)',amount:r.amount||0,_src:'loanrepay'});
-    autoCashExp+=r.amount||0;
-  }
-  // Oil/Lube purchase payments made in Cash
-  const olKeys2=DB.listActive('pbms_oil_purchase_');
-  for(const p of olKeys2){
-    if(!p||!p.payments)continue;
-    for(const pay of p.payments){
-      if(!pay||pay.date!==date||pay.mode!=='Cash'||(pay.amount||0)<=0)continue;
-      cashExpItems.push({description:`${p.supplier||'Oil/Lube'} — Oil/Lube Purchase`,
-        category:'Oil/Lube Purchase (Cash)',amount:pay.amount,_src:'oilpurchase'});
-      autoCashExp+=pay.amount;
-    }
-  }
-  // Shop (retail) purchase payments made in Cash
-  const shopPurKeys2=listShopPurchases();
-  for(const p of shopPurKeys2){
-    if(!p||!p.payments)continue;
-    for(const pay of p.payments){
-      if(!pay||pay.date!==date||pay.mode!=='Cash'||(pay.amount||0)<=0)continue;
-      cashExpItems.push({description:`Shop purchase ${p.ref||''}`,
-        category:'Shop Purchase (Cash)',amount:pay.amount,_src:'shoppurchase'});
-      autoCashExp+=pay.amount;
-    }
-  }
-  // Saved manual override takes precedence ONLY if the user explicitly
-  // overrode it. Otherwise always use the freshly recomputed auto value,
-  // so new/edited/deleted cash expenses are picked up immediately —
-  // even for a date whose settlement was already saved earlier.
-  const isOverridden=!!(saved&&saved.expManualOverride);
-  const cashExpenses=isOverridden?(saved.cashExpenses??0):autoCashExp;
-  // If cash expenses run higher than cash actually collected today (a big
-  // cash purchase or advance can easily outrun the till), the shortfall
-  // doesn't block settlement anymore — it's covered by a withdrawal from the
-  // bank, same as an owner pulling extra cash to top up the drawer. Net cash
-  // deposited to the bank can never go negative; the shortfall is tracked
-  // separately and posted as an outflow in the Bank Book.
-  const netCashCollected=cashCollection-cashExpenses;
-  const cashDepositToBank=Math.max(netCashCollected,0);
-  const bankShortfall=Math.max(-netCashCollected,0);
+  // Expenses, Cash Advances, Loan Repayments and Purchases are no longer
+  // netted against today's cash collection here — regardless of mode
+  // (Cash/Bank Transfer/UPI/Cheque), they post as their own direct outflow
+  // rows in the Bank Book (see buildBankBook). Daily Settlement now only
+  // records what was collected and deposits it to the bank in full.
+  const cashDepositToBank=cashCollection;
   const noSessions=sessions.length===0;
   const noCollections=noSessions&&shopSalesToday.length===0&&creditRecoveryCash===0;
 
@@ -5664,81 +5593,15 @@ async function loadSettlementForDate(date){
     </div>`:''}
   </div>
 
-  <!-- SECTION B: Cash Expenses — auto-filled from Expenses page -->
-  <div class="card overflow-hidden mb-4">
-    <div class="px-4 py-3 border-b border-slate-100 bg-slate-50">
-      <h2 class="font-semibold text-slate-700 text-sm">Cash Expenses</h2>
-      <p class="text-xs text-slate-400 mt-0.5">Paid from cash collection today. Auto-filled from Expenses (Cash mode).</p>
-    </div>
-    <div class="px-4 py-4">
-      <div class="flex items-center gap-3 flex-wrap">
-        <label class="text-sm text-slate-600 w-40">Cash Expenses</label>
-        <div class="flex items-center gap-2">
-          <input type="number" id="settl-exp" class="${isOverridden?'border-amber-400 bg-amber-50':'auto-field'} form-input w-44 text-right font-mono text-sm" readonly data-override="${isOverridden?'true':'false'}"
-            value="${cashExpenses||''}" placeholder="0">
-          <span class="text-xs ${isOverridden?'text-amber-600':'text-blue-600'} font-semibold">${isOverridden?'✏ Manual':'🔵'}</span>
-          <button onclick="unlockSettlExp(${cashCollection},${upiCollection},${cardCollection})"
-            class="btn btn-ghost btn-sm text-xs no-print">Override ✏</button>
-          ${isOverridden?`<button onclick="resetSettlExpAuto('${date}')"
-            class="btn btn-ghost btn-sm text-xs no-print text-blue-600">↺ Use Auto (${fmt.currency(autoCashExp)})</button>`:''}
-        </div>
-        ${cashExpItems.length?`<button onclick="toggleExpBreakdown()" class="text-xs text-blue-600 hover:text-blue-800 underline inline-block py-2 -my-2">
-          View Details (${cashExpItems.length} item${cashExpItems.length!==1?'s':''})</button>`:'<span class="text-xs text-slate-400">No cash outflows today</span>'}
-      </div>
-      ${cashExpItems.length?`<div id="exp-breakdown" class="hidden mt-3 border border-slate-200 rounded-lg overflow-hidden">
-        <div class="text-xs text-slate-500 px-3 py-2 bg-slate-50 font-semibold">Auto-detected cash outflows — ${fmt.date(date)}</div>
-        ${cashExpItems.map(e=>`<div class="flex items-center justify-between px-3 py-1.5 border-t border-slate-100 text-xs">
-          <span class="text-slate-600">${e.description} <span class="text-slate-400">(${e.category})</span></span>
-          <div class="flex items-center gap-2">
-            <span class="badge ${{advance:'text-purple-700 bg-purple-100',fuelpurchase:'text-blue-700 bg-blue-100',loanrepay:'text-orange-700 bg-orange-100',oilpurchase:'text-teal-700 bg-teal-100',shoppurchase:'text-indigo-700 bg-indigo-100'}[e._src]||'badge-amber'} text-xs">${{advance:'Credit',fuelpurchase:'Fuel',loanrepay:'Loan',oilpurchase:'Oil/Lube',shoppurchase:'Shop'}[e._src]||'Expense'}</span>
-            <span class="font-mono text-red-600">${fmt.currency(e.amount)}</span>
-          </div>
-        </div>`).join('')}
-        <div class="flex items-center justify-between px-3 py-2 bg-slate-50 border-t border-slate-200 text-xs font-semibold">
-          <span>Total Auto-filled</span><span class="font-mono">${fmt.currency(autoCashExp)}</span>
-        </div>
-      </div>`:''}
-      <div id="settl-exp-err" class="mt-2 text-amber-700 text-xs hidden">⚠ Cash expenses exceed cash collected today — the difference will be withdrawn from the Bank Book to cover the shortfall.</div>
-    </div>
-  </div>
-
-  <!-- SECTION C: Auto-calculated -->
-  <div class="card overflow-hidden mb-4">
-    <div class="px-4 py-3 border-b border-slate-100 bg-slate-50">
-      <h2 class="font-semibold text-slate-700 text-sm">Settlement Summary</h2>
-    </div>
-    <div class="divide-y divide-slate-100 text-sm">
-      <div class="flex items-center justify-between px-4 py-2.5 text-slate-500">
-        <span>Cash Collection</span>
-        <span class="font-mono">${fmt.currency(cashCollection)}</span>
-      </div>
-      <div class="flex items-center justify-between px-4 py-2.5 text-red-600">
-        <span>− Cash Expenses</span>
-        <span id="settl-exp-display" class="font-mono">${fmt.currency(cashExpenses)}</span>
-      </div>
-      <div class="flex items-center justify-between px-4 py-3 bg-blue-50 font-semibold border-t-2 border-blue-200">
-        <span class="text-blue-700">Net Cash Collected</span>
-        <span id="settl-net" class="font-mono ${netCashCollected<0?'text-red-600':'text-blue-700'}">${netCashCollected<0?'−':''}${fmt.currency(Math.abs(netCashCollected))} <span class="text-xs font-normal text-slate-400">🔵</span></span>
-      </div>
-      <div class="flex items-center justify-between px-4 py-2.5 text-slate-500">
-        <span>Cash Deposit to Bank <span class="text-xs text-slate-400">(= Net Cash Collected, floor ₹0)</span></span>
-        <span id="settl-deposit" class="font-mono font-semibold text-slate-700">${fmt.currency(cashDepositToBank)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
-      </div>
-      <div class="flex items-center justify-between px-4 py-2.5 text-red-600" id="settl-shortfall-row" ${bankShortfall>0?'':'style="display:none"'}>
-        <span>Bank Withdrawal <span class="text-xs text-slate-400">(cash expenses exceeded collection)</span></span>
-        <span id="settl-shortfall" class="font-mono font-semibold">− ${fmt.currency(bankShortfall)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
-      </div>
-    </div>
-  </div>
-
-  <!-- SECTION D: What goes to bank -->
+  <!-- SECTION C: What goes to bank -->
   <div class="card overflow-hidden mb-5">
     <div class="px-4 py-3 border-b border-slate-100 bg-green-50">
-      <h2 class="font-semibold text-green-700 text-sm">Today's Bank Movement</h2>
+      <h2 class="font-semibold text-green-700 text-sm">Today's Bank Inflows</h2>
+      <p class="text-xs text-green-600 mt-0.5">Full cash collection deposits to the bank — expenses, cash advances, loan repayments and purchases are recorded separately in the Bank Book, whatever their payment mode.</p>
     </div>
     <div class="divide-y divide-slate-100 text-sm">
       <div class="flex items-center justify-between px-4 py-2.5 text-slate-500">
-        <span>Cash Deposit</span>
+        <span>Cash Deposit <span class="text-xs text-slate-400">(= full Cash Collection)</span></span>
         <span id="bank-cash-dep" class="font-mono font-semibold">${fmt.currency(cashDepositToBank)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
       </div>
       <div class="flex items-center justify-between px-4 py-2.5 text-indigo-600">
@@ -5749,13 +5612,9 @@ async function loadSettlementForDate(date){
         <span>Card (direct to bank)</span>
         <span class="font-mono font-semibold">${fmt.currency(cardCollection)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
       </div>
-      <div class="flex items-center justify-between px-4 py-2.5 text-red-600" id="bank-shortfall-row" ${bankShortfall>0?'':'style="display:none"'}>
-        <span>Withdrawal (cash expense shortfall)</span>
-        <span id="bank-shortfall-line" class="font-mono font-semibold">− ${fmt.currency(bankShortfall)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
-      </div>
       <div class="flex items-center justify-between px-4 py-3 bg-green-50 font-bold border-t-2 border-green-200">
-        <span class="text-green-700">Net Bank Movement Today</span>
-        <span id="bank-total-inflow" class="font-mono ${(cashDepositToBank+upiCollection+cardCollection-bankShortfall)<0?'text-red-600':'text-green-700'}">${fmt.currency(cashDepositToBank+upiCollection+cardCollection-bankShortfall)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
+        <span class="text-green-700">Total Bank Inflow Today</span>
+        <span id="bank-total-inflow" class="font-mono text-green-700">${fmt.currency(cashDepositToBank+upiCollection+cardCollection)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
       </div>
     </div>
   </div>
@@ -5777,85 +5636,24 @@ async function loadSettlementForDate(date){
   </button>`;
 }
 
-function toggleExpBreakdown(){
-  const el=document.getElementById('exp-breakdown');
-  if(el)el.classList.toggle('hidden');
-}
-
-function unlockSettlExp(cashColl,upiColl,cardColl){
-  const el=document.getElementById('settl-exp');if(!el||!el.readOnly)return;
-  if(!confirm('You are overriding the auto-calculated amount. Make sure this is correct.'))return;
-  el.readOnly=false;
-  el.dataset.override='true';
-  el.classList.remove('auto-field');
-  el.classList.add('border-amber-400','bg-amber-50');
-  el.step='0.01';el.min='0';
-  el.addEventListener('input',()=>calcSettlement(cashColl,upiColl,cardColl));
-  toast('Cash expenses field unlocked for manual override','warning');
-  el.focus();
-}
-
-async function resetSettlExpAuto(date){
-  if(!confirm('Switch this date back to auto-detecting cash expenses from the Expenses page? The manual override amount will be discarded.'))return;
-  const saved=DB.get(`pbms_daily_settlement_${date}`);
-  if(saved){DB.set(`pbms_daily_settlement_${date}`,{...saved,expManualOverride:false});}
-  toast('Cash expenses reset to auto-detect','success');
-  await loadSettlementForDate(date);
-}
-
-function calcSettlement(cashColl,upiColl,cardColl){
-  const exp=parseFloat(document.getElementById('settl-exp')?.value)||0;
-  const net=cashColl-exp;
-  const deposit=Math.max(net,0);
-  const shortfall=Math.max(-net,0);
-  const errEl=document.getElementById('settl-exp-err');
-  if(errEl)errEl.classList.toggle('hidden',shortfall<=0);
-  const s=id=>document.getElementById(id);
-  if(s('settl-exp-display'))s('settl-exp-display').textContent=fmt.currency(exp);
-  if(s('settl-net'))s('settl-net').innerHTML=`${net<0?'−':''}${fmt.currency(Math.abs(net))} <span class="text-xs font-normal text-slate-400">🔵</span>`;
-  if(s('settl-net'))s('settl-net').className=`font-mono ${net<0?'text-red-600':'text-blue-700'}`;
-  if(s('settl-deposit'))s('settl-deposit').innerHTML=`${fmt.currency(deposit)} <span class="text-xs font-normal text-slate-400">🔵</span>`;
-  if(s('bank-cash-dep'))s('bank-cash-dep').innerHTML=`${fmt.currency(deposit)} <span class="text-xs font-normal text-slate-400">🔵</span>`;
-  const shortfallHtml=`− ${fmt.currency(shortfall)} <span class="text-xs font-normal text-slate-400">🔵</span>`;
-  if(s('settl-shortfall-row'))s('settl-shortfall-row').style.display=shortfall>0?'':'none';
-  if(s('settl-shortfall'))s('settl-shortfall').innerHTML=shortfallHtml;
-  if(s('bank-shortfall-row'))s('bank-shortfall-row').style.display=shortfall>0?'':'none';
-  if(s('bank-shortfall-line'))s('bank-shortfall-line').innerHTML=shortfallHtml;
-  const netMovement=deposit+upiColl+cardColl-shortfall;
-  if(s('bank-total-inflow')){
-    s('bank-total-inflow').innerHTML=`${fmt.currency(netMovement)} <span class="text-xs font-normal text-slate-400">🔵</span>`;
-    s('bank-total-inflow').className=`font-mono ${netMovement<0?'text-red-600':'text-green-700'}`;
-  }
-}
-
 async function saveSettlement(date){
   const cashCollection =parseFloat(document.getElementById('s-cash')?.value)||0;
   const upiCollection  =parseFloat(document.getElementById('s-upi')?.value)||0;
   const cardCollection =parseFloat(document.getElementById('s-card')?.value)||0;
   const creditSales    =parseFloat(document.getElementById('s-credit')?.value)||0;
   const totalCollected =parseFloat(document.getElementById('s-total')?.value)||0;
-  const cashExpenses   =parseFloat(document.getElementById('settl-exp')?.value)||0;
-  const expManualOverride=document.getElementById('settl-exp')?.dataset.override==='true';
 
-  const netCashCollected=cashCollection-cashExpenses;
-  const cashDepositToBank=Math.max(netCashCollected,0);
-  const bankShortfall=Math.max(-netCashCollected,0);
-  // Cash expenses exceeding cash collected no longer blocks settlement — it
-  // just means today's expenses were partly funded by pulling extra cash
-  // from the bank rather than from the till. Confirm before saving so it's
-  // never silent, since it's an unusual day worth double-checking.
-  if(bankShortfall>0){
-    if(!confirm(`Cash expenses (${fmt.currency(cashExpenses)}) exceed cash collected (${fmt.currency(cashCollection)}) by ${fmt.currency(bankShortfall)}.\n\nThis will be recorded as a ${fmt.currency(bankShortfall)} withdrawal from the Bank Book to cover the shortfall. Continue?`))return;
-  }
-  const totalBankInflowToday=cashDepositToBank+upiCollection+cardCollection-bankShortfall;
+  // Full cash collection deposits to the bank — expenses, cash advances,
+  // loan repayments and purchases no longer net against it here (any mode)
+  // since they post as their own direct outflow rows in the Bank Book.
+  const cashDepositToBank=cashCollection;
+  const totalBankInflowToday=cashDepositToBank+upiCollection+cardCollection;
   DB.set(`pbms_daily_settlement_${date}`,{
     date,cashCollection,upiCollection,cardCollection,creditSales,totalCollected,
-    cashExpenses,expManualOverride,netCashCollected,cashDepositToBank,bankShortfall,totalBankInflowToday
+    cashDepositToBank,totalBankInflowToday
   });
 
-  toast(bankShortfall>0
-    ?`Settlement saved. Bank net change ${fmt.currency(totalBankInflowToday)} (₹${fmt.currency(bankShortfall)} withdrawn to cover shortfall).`
-    :`Settlement saved. Bank credited ${fmt.currency(totalBankInflowToday)}.`,'success');
+  toast(`Settlement saved. Bank credited ${fmt.currency(totalBankInflowToday)}.`,'success');
   await loadSettlementForDate(date);
 }
 
@@ -6100,22 +5898,62 @@ async function buildBankBook(fromDate,toDate){
     stats.openingBalance=ob.amount;
   }
 
-  // 2. Daily settlements → Cash Deposit, UPI, Card rows
-  const settlKeys=DB.listKeys('pbms_daily_settlement_');
-  for(const k of settlKeys){
+  // 2. Fuel/oil session collections + Shop sale collections — computed
+  // directly from the underlying records (Cash, UPI, Card), not from a
+  // saved Daily Settlement record. This means the Bank Book always reflects
+  // reality the moment a shift is settled or a shop sale is billed, without
+  // needing anyone to separately open Daily Settlement and click Save.
+  // Dated by settlement date (the day cash was actually counted and could
+  // be banked) for sessions, and by sale date for shop billing.
+  const dayCashBB={},dayUpiBB={},dayCardBB={};
+  for(const s of DB.listActive('pbms_session_')){
+    if(!s||s.status!=='Settled')continue;
+    const dt=s.settledDate||s.checkOutDate||s.checkInDate;
+    if(!dt||dt<fromDate||dt>toDate)continue;
+    const col=s.collections||{};
+    dayCashBB[dt]=(dayCashBB[dt]||0)+(col.cashAmt||0);
+    dayUpiBB[dt]=(dayUpiBB[dt]||0)+(col.upiAmt||0);
+    dayCardBB[dt]=(dayCardBB[dt]||0)+(col.cardAmt||0);
+  }
+  for(const ss of listShopSales()){
+    if(!ss||ss.date<fromDate||ss.date>toDate)continue;
+    const mode=(ss.payments&&ss.payments[0]?.mode)||'';
+    const amt=ss.payments?.[0]?.amount||0;
+    if(mode==='Cash')dayCashBB[ss.date]=(dayCashBB[ss.date]||0)+amt;
+    else if(mode==='UPI')dayUpiBB[ss.date]=(dayUpiBB[ss.date]||0)+amt;
+    else if(mode==='Card')dayCardBB[ss.date]=(dayCardBB[ss.date]||0)+amt;
+  }
+  // Credit recovery received in Cash joins the same physical drawer as
+  // fuel/shop cash, so it deposits alongside it on the same day.
+  for(const p of DB.listActive('pbms_payment_')){
+    if(!p||p.mode!=='Cash'||p.date<fromDate||p.date>toDate)continue;
+    dayCashBB[p.date]=(dayCashBB[p.date]||0)+(p.amount||0);
+  }
+  const settlCreatedAt={};
+  for(const k of DB.listKeys('pbms_daily_settlement_')){const s=DB.get(k);if(s)settlCreatedAt[s.date]=s.createdAt;}
+  for(const dt of Object.keys(dayCashBB).sort()){
+    if(dayCashBB[dt]>0){
+      rows.push({date:dt,desc:'Cash deposit — fuel & shop collections',type:'Cash Deposit',ref:'',in:dayCashBB[dt],out:0,createdAt:settlCreatedAt[dt]||dt});
+      stats.cashDep+=dayCashBB[dt];stats.totalIn+=dayCashBB[dt];
+    }
+  }
+  for(const dt of Object.keys(dayUpiBB).sort()){
+    if(dayUpiBB[dt]>0){
+      rows.push({date:dt,desc:'UPI collections',type:'UPI',ref:'',in:dayUpiBB[dt],out:0,createdAt:settlCreatedAt[dt]||dt});
+      stats.upi+=dayUpiBB[dt];stats.totalIn+=dayUpiBB[dt];
+    }
+  }
+  for(const dt of Object.keys(dayCardBB).sort()){
+    if(dayCardBB[dt]>0){
+      rows.push({date:dt,desc:'Card collections',type:'Card',ref:'',in:dayCardBB[dt],out:0,createdAt:settlCreatedAt[dt]||dt});
+      stats.card+=dayCardBB[dt];stats.totalIn+=dayCardBB[dt];
+    }
+  }
+  // Legacy bank-shortfall field, kept for backward compatibility with any
+  // settlement saved during the brief window this existed (now obsolete —
+  // expenses no longer net against cash collection at all).
+  for(const k of DB.listKeys('pbms_daily_settlement_')){
     const s=DB.get(k);if(!s||s.date<fromDate||s.date>toDate)continue;
-    if((s.cashDepositToBank||0)>0){
-      rows.push({date:s.date,desc:'Cash deposit — daily settlement',type:'Cash Deposit',ref:'',in:s.cashDepositToBank,out:0,createdAt:s.createdAt});
-      stats.cashDep+=s.cashDepositToBank;stats.totalIn+=s.cashDepositToBank;
-    }
-    if((s.upiCollection||0)>0){
-      rows.push({date:s.date,desc:'UPI collections',type:'UPI',ref:'',in:s.upiCollection,out:0,createdAt:s.createdAt});
-      stats.upi+=s.upiCollection;stats.totalIn+=s.upiCollection;
-    }
-    if((s.cardCollection||0)>0){
-      rows.push({date:s.date,desc:'Card collections',type:'Card',ref:'',in:s.cardCollection,out:0,createdAt:s.createdAt});
-      stats.card+=s.cardCollection;stats.totalIn+=s.cardCollection;
-    }
     if((s.bankShortfall||0)>0){
       rows.push({date:s.date,desc:'Cash withdrawn — cash expenses exceeded collection',type:'Cash Withdrawal',ref:'',in:0,out:s.bankShortfall,createdAt:s.createdAt});
       stats.settlementShortfallOut+=s.bankShortfall;stats.totalOut+=s.bankShortfall;
@@ -6144,26 +5982,28 @@ async function buildBankBook(fromDate,toDate){
     stats.loanIn+=l.principalAmount||0;stats.totalIn+=l.principalAmount||0;
   }
 
-  // 5. Loan repayments — use pre-loaded loanMap (no extra DB calls)
+  // 5. Loan repayments — ALL modes post to the bank directly now (Expenses,
+  // Cash Advances, Loan Repayments and Purchases are treated as bank
+  // transactions regardless of Cash/Bank Transfer/UPI/Cheque — they no
+  // longer net against the till via Daily Settlement).
   const repayKeys=DB.listActive('pbms_loan_repayment_');
   for(const r of repayKeys){
     if(!r||r.date<fromDate||r.date>toDate)continue;
-    if(r.mode==='Cash')continue;
     const lenderName=loanMap[r.loanId]?.lenderName||r.lenderName||'Lender';
     rows.push({date:r.date,desc:`${lenderName} — ${r.remarks||'repayment'}${r.referenceNo?' · '+r.referenceNo:''}`,type:'Loan Repaid',ref:r.referenceNo||'',in:0,out:r.amount||0,createdAt:r.createdAt});
     stats.loanOut+=r.amount||0;stats.totalOut+=r.amount||0;
   }
 
-  // 6. Cash advances via bank mode
+  // 6. Cash advances — any mode posts to the bank directly.
   const caKeys=DB.listActive('pbms_credit_sale_');
   for(const cs of caKeys){
     if(cs.date<fromDate||cs.date>toDate)continue;
-    if(cs.saleType!=='CashAdvance'||!cs.givenVia||cs.givenVia==='Cash')continue;
+    if(cs.saleType!=='CashAdvance')continue;
     rows.push({date:cs.date,desc:`${cs.customerName||'Customer'} — cash advance${cs.note?' · '+cs.note:''}`,type:'Cash Advance Out',ref:cs.referenceNo||'',in:0,out:cs.amount||0,createdAt:cs.createdAt});
     stats.advanceOut+=cs.amount||0;stats.totalOut+=cs.amount||0;
   }
 
-  // 7. Paid fuel purchases (only Bank Transfer mode touches the bank) — dated by the
+  // 7. Paid fuel purchases — any mode posts to the bank directly — dated by the
   // actual payment date (paidDate), not the invoice/purchase date, so settling an old
   // credit purchase doesn't retroactively rewrite an already-closed month's balance.
   const purKeys=DB.listActive('pbms_purchase_');const pending=[];
@@ -6172,14 +6012,13 @@ async function buildBankBook(fromDate,toDate){
     const payDate=p.paidDate||p.date; // legacy records (pre-paidDate) fall back to purchase date
     if(p.paymentStatus==='Paid'){
       if(payDate<fromDate||payDate>toDate)continue;
-      if((p.mode||'Bank Transfer')==='Cash')continue;
       const amt=p.invoiceAmount||0;
       rows.push({date:payDate,desc:`${p.supplierName||'Supplier'} — ${p.product} ${fmt.litres(p.quantity||0)}${p.invoiceNo?' · '+p.invoiceNo:''}`,type:'Fuel Payment',ref:p.invoiceNo||'',in:0,out:amt,createdAt:p.createdAt});
       stats.fuelOut+=amt;stats.totalOut+=amt;
     } else {if(p.date>=fromDate&&p.date<=toDate)pending.push(p);}
   }
 
-  // 8. Oil/lube paid purchases (outflow) — one row per actual payment date
+  // 8. Oil/lube paid purchases (outflow) — any mode, one row per actual payment date
   const olKeys=DB.listActive('pbms_oil_purchase_');
   for(const p of olKeys){
     if(!p)continue;
@@ -6189,29 +6028,26 @@ async function buildBankBook(fromDate,toDate){
     const pays=p.payments&&p.payments.length?p.payments:((p.paidAmount||0)>0?[{date:p.date,amount:p.paidAmount}]:[]);
     for(const pay of pays){
       if(!pay||pay.date<fromDate||pay.date>toDate||(pay.amount||0)<=0)continue;
-      if(pay.mode==='Cash')continue; // cash payments net against cash-in-hand in Daily Settlement instead
       rows.push({date:pay.date,desc:`${p.supplier||'Oil/Lube'} — oil purchase${p.remarks?' ('+p.remarks+')':''}`,type:'Oil Payment',ref:'',in:0,out:pay.amount,createdAt:pay.createdAt||p.createdAt});
       stats.oilOut+=pay.amount;stats.totalOut+=pay.amount;
     }
   }
 
-  // 9. Non-cash expenses (outflow)
+  // 9. Expenses (outflow) — any mode
   const expKeys=DB.listActive('pbms_expense_');
   for(const e of expKeys){
     if(!e||e.date<fromDate||e.date>toDate)continue;
-    if(!e.mode||e.mode==='Cash')continue;
-    rows.push({date:e.date,desc:`${e.description||'Expense'} (${e.category})`,type:'Bank Expense',ref:'',in:0,out:e.amount||0,createdAt:e.createdAt});
+    rows.push({date:e.date,desc:`${e.description||'Expense'} (${e.category})`,type:'Expense',ref:'',in:0,out:e.amount||0,createdAt:e.createdAt});
     stats.expOut+=e.amount||0;stats.totalOut+=e.amount||0;
   }
 
-  // 9b. Shop (retail) purchase payments — non-cash modes touch the bank
+  // 9b. Shop (retail) purchase payments — any mode touches the bank
   const shopPurKeys=listShopPurchases();
   for(const p of shopPurKeys){
     if(!p||!p.payments)continue;
     for(const pay of p.payments){
       if(!pay||pay.date<fromDate||pay.date>toDate||(pay.amount||0)<=0)continue;
-      if(!pay.mode||pay.mode==='Cash')continue;
-      rows.push({date:pay.date,desc:`Shop purchase — ${p.ref||''} (${pay.mode})`,type:'Shop Payment',ref:p.ref||'',in:0,out:pay.amount,createdAt:pay.createdAt||p.createdAt});
+      rows.push({date:pay.date,desc:`Shop purchase — ${p.ref||''} (${pay.mode||'Cash'})`,type:'Shop Payment',ref:p.ref||'',in:0,out:pay.amount,createdAt:pay.createdAt||p.createdAt});
       stats.shopOut=(stats.shopOut||0)+pay.amount;stats.totalOut+=pay.amount;
     }
   }
@@ -6852,13 +6688,11 @@ function computeDailyReportData(date){
     if(ss.status!=='Settled'){pendingSettleCount++;pendingSettleAmt+=shiftAmt;}
   }
 
-  // ── 1b. CASH COLLECTED & SETTLED — keyed by settlement date, not
-  // check-in date. A shift handed over today but settled tomorrow must not
-  // show its cash breakdown on today's report — it belongs to whichever
-  // date the cash was actually counted, so reconciliation always matches
-  // the banking day. Falls back to checkOutDate/checkInDate for legacy
-  // records saved before settledDate existed.
-  const settledSessions=allSessionsForReport.filter(ss=>ss.status==='Settled'&&(ss.settledDate||ss.checkOutDate||ss.checkInDate)===date);
+  // ── 1b. CASH COLLECTED & SETTLED — keyed by the shift's opening
+  // (check-in) date, not the settlement date. A shift checked in today
+  // shows its cash breakdown on today's report once settled, even if the
+  // actual cash count happens on a later date.
+  const settledSessions=allSessionsForReport.filter(ss=>ss.status==='Settled'&&ss.checkInDate===date);
   let fuelOilCash=0,fuelOilUpi=0,fuelOilCard=0,fuelOilCredit=0,fuelOil=0,fuelDiscount=0,totalSE=0;
   for(const ss of settledSessions){
     const col=ss.collections||{};
@@ -7039,17 +6873,18 @@ async function loadDailyReport(){
   <div class="card mb-4 overflow-hidden">
     <div class="px-4 py-2.5 bg-teal-50 border-b border-teal-100 flex items-center gap-2">
       <span class="text-sm font-bold text-teal-800">💰 Cash Collected & Settled</span>
-      <span class="ml-auto text-xs text-teal-600">${settledSessions.length} shift(s) settled on ${dateLabel}</span>
+      <span class="ml-auto text-xs text-teal-600">${settledSessions.length} shift(s) checked in on ${dateLabel}</span>
     </div>
-    <div class="px-4 py-1.5 text-xs text-slate-400">Reflects shifts whose cash was counted and settled on this date — may include shifts checked in on an earlier date.</div>
-    ${settledSessions.length===0?`<div class="px-4 py-4 text-sm text-slate-400 text-center">No settlements recorded for ${dateLabel}</div>`:`
+    <div class="px-4 py-1.5 text-xs text-slate-400">Reflects shifts that started (checked in) on this date, once their cash has been counted and settled — even if that settlement happens on a later date.</div>
+    ${settledSessions.length===0?`<div class="px-4 py-4 text-sm text-slate-400 text-center">No settled shifts checked in on ${dateLabel}</div>`:`
     <div class="overflow-x-auto"><table class="data-table text-xs">
-      <thead><tr><th>Employee</th><th>Checked in</th><th class="text-right">Oil ₹</th><th class="text-right">Cash</th><th class="text-right">UPI</th><th class="text-right">Card</th><th class="text-right">Credit</th><th class="text-right">S/E ₹</th></tr></thead>
+      <thead><tr><th>Employee</th><th>Settled on</th><th class="text-right">Oil ₹</th><th class="text-right">Cash</th><th class="text-right">UPI</th><th class="text-right">Card</th><th class="text-right">Credit</th><th class="text-right">S/E ₹</th></tr></thead>
       <tbody>
       ${settledSessions.map(ss=>{
         const c=ss.collections||{};
         const se=ss.shortageExcess||0;
-        return`<tr><td>${ss.employeeName||'—'}</td><td class="text-xs text-slate-500">${fmt.date(ss.checkInDate)}</td><td class="text-right font-mono">${(c.oilAmt||0)?fmt.currency(c.oilAmt):'—'}</td><td class="text-right font-mono text-green-700">${(c.cashAmt||0)?fmt.currency(c.cashAmt):'—'}</td><td class="text-right font-mono text-green-700">${(c.upiAmt||0)?fmt.currency(c.upiAmt):'—'}</td><td class="text-right font-mono">${(c.cardAmt||0)?fmt.currency(c.cardAmt):'—'}</td><td class="text-right font-mono text-amber-600">${(c.creditAmt||0)?fmt.currency(c.creditAmt):'—'}</td><td class="text-right font-mono font-semibold ${se<0?'text-red-600':se>0?'text-green-700':'text-slate-400'}">${se!==0?fmt.currency(se):'—'}</td></tr>`;
+        const settledOn=ss.settledDate||ss.checkOutDate||ss.checkInDate;
+        return`<tr><td>${ss.employeeName||'—'}</td><td class="text-xs text-slate-500">${fmt.date(settledOn)}${settledOn!==ss.checkInDate?' <span class="text-amber-500">(late)</span>':''}</td><td class="text-right font-mono">${(c.oilAmt||0)?fmt.currency(c.oilAmt):'—'}</td><td class="text-right font-mono text-green-700">${(c.cashAmt||0)?fmt.currency(c.cashAmt):'—'}</td><td class="text-right font-mono text-green-700">${(c.upiAmt||0)?fmt.currency(c.upiAmt):'—'}</td><td class="text-right font-mono">${(c.cardAmt||0)?fmt.currency(c.cardAmt):'—'}</td><td class="text-right font-mono text-amber-600">${(c.creditAmt||0)?fmt.currency(c.creditAmt):'—'}</td><td class="text-right font-mono font-semibold ${se<0?'text-red-600':se>0?'text-green-700':'text-slate-400'}">${se!==0?fmt.currency(se):'—'}</td></tr>`;
       }).join('')}
       ${shopSalesToday.length?`<tr class="bg-slate-50"><td colspan="2" class="text-slate-500 italic">🛒 Shop Sales (${shopSalesToday.length} invoice(s))</td><td class="text-right font-mono">—</td><td class="text-right font-mono text-green-700">${shopCash?fmt.currency(shopCash):'—'}</td><td class="text-right font-mono text-green-700">${shopUpi?fmt.currency(shopUpi):'—'}</td><td class="text-right font-mono">${shopCard?fmt.currency(shopCard):'—'}</td><td class="text-right font-mono text-amber-600">${shopCredit?fmt.currency(shopCredit):'—'}</td><td class="text-right font-mono">—</td></tr>`:''}
       <tr class="font-bold bg-slate-50 border-t-2 border-slate-300">
@@ -8398,13 +8233,13 @@ async function loadMonthlyReport(monthStr){
   const dailyData=await getSalesForMonth(year,month);
   const sessKeys=DB.listKeys('pbms_session_');
   // S/E, oil, and discount are all settlement-time figures (they come out
-  // of the cash count, not the fuel dispensed) — keyed by settlement date,
-  // matching getSalesForMonth's cash-collected logic, not check-in date.
+  // of the cash count, not the fuel dispensed) — keyed by the shift's
+  // opening (check-in) date, matching getSalesForMonth's cash-collected logic.
   const dayStats={};
   for(const k of sessKeys){
     const s=DB.get(k);
     if(!s||s.status!=='Settled')continue;
-    const settleDate=s.settledDate||s.checkOutDate||s.checkInDate;
+    const settleDate=s.checkInDate;
     if(!settleDate||!settleDate.startsWith(monthStr))continue;
     if(!dayStats[settleDate])dayStats[settleDate]={se:0};
     dayStats[settleDate].se+=s.shortageExcess||0;
@@ -8420,7 +8255,7 @@ async function loadMonthlyReport(monthStr){
   for(const k of sessKeys){
     const s2=DB.get(k);
     if(!s2||s2.status!=='Settled')continue;
-    const settleDate2=s2.settledDate||s2.checkOutDate||s2.checkInDate;
+    const settleDate2=s2.checkInDate;
     if(!settleDate2||!settleDate2.startsWith(monthStr))continue;
     if((s2.collections?.oilAmt||0)>0)dayOil[settleDate2]=(dayOil[settleDate2]||0)+(s2.collections.oilAmt||0);
     if((s2.collections?.discountAmt||0)>0)dayDiscount[settleDate2]=(dayDiscount[settleDate2]||0)+(s2.collections.discountAmt||0);
@@ -8849,8 +8684,7 @@ async function loadProfitReport(){
   const rows=await Promise.all(dateRanges.map(async({label,from,to,key})=>{
     const sessForRange=allSessions.filter(s=>{
       if(s.status!=='Settled')return false;
-      const settleDate=s.settledDate||s.checkOutDate||s.checkInDate;
-      return settleDate>=from&&settleDate<=to;
+      return s.checkInDate>=from&&s.checkInDate<=to;
     });
     let hsdQty=0,msQty=0,fuelRevenue=0,oilRevenue=0,discountAmt=0,purchaseCost=0;
     const prodQty={};
@@ -10204,26 +10038,24 @@ async function seedDemoData(){
 
   // Daily settlements for last 7 settled days
   // cashCollection, upiCollection, cardCollection derived from recentSessions above
-  const settlData=[
-    // [daysAgo, cashExp]
-    [7,3000],[6,2500],[5,1800],[4,3200],[3,2000],[2,1500],[1,2800]
-  ];
   // Use approximate session cash amounts matching recentSessions seed
   const settlCash=[75850,68300,70200,71700,69500,65100,61500];
   const settlUpi =[9600, 9000, 9000, 9000, 9000,10000,10000];
   const settlCard=[5000, 5000, 5000, 5000, 5000, 5000, 5000];
   const settlCred=[1250, 2000, 1300, 1847, 1300, 1997, 1847];
-  for(let i=0;i<settlData.length;i++){
-    const[day,cashExp]=settlData[i];const date=d(day);
+  for(let i=0;i<7;i++){
+    const date=d(7-i);
     const cashColl=settlCash[i],upiColl=settlUpi[i],cardColl=settlCard[i],creditS=settlCred[i];
     const total=cashColl+upiColl+cardColl+creditS;
-    const net=cashColl-cashExp;
     DB.set(`pbms_daily_settlement_${date}`,{
       date,cashCollection:cashColl,upiCollection:upiColl,cardCollection:cardColl,
-      creditSales:creditS,totalCollected:total,cashExpenses:cashExp,expManualOverride:true,
-      netCashCollected:net,cashDepositToBank:net,totalBankInflowToday:net+upiColl+cardColl
+      creditSales:creditS,totalCollected:total,
+      cashDepositToBank:cashColl,totalBankInflowToday:cashColl+upiColl+cardColl
     });
   }
+
+  // Expenses seeded above (see `expenses` array) post to the Bank Book
+  // directly regardless of mode — no separate cash-expense netting needed.
 
   // Attendance (7 days)
   const attStaff=['EMP001','EMP002','EMP003','EMP004','EMP005'];
@@ -11915,5 +11747,3 @@ if(document.readyState==='loading'){
 </script>
 </body>
 </html>
-
-
