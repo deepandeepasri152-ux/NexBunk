@@ -20,7 +20,7 @@
 // Still bump CACHE_NAME when you deploy a big change, if you want to force
 // an immediate, clean cutover (it clears old cache entries on activate) —
 // but it's no longer required for the app to eventually catch up.
-const CACHE_NAME = 'nexbunk-shell-v2';
+const CACHE_NAME = 'nexbunk-shell-v3';
 const SHELL_URL = './index.html'; // update if your deployed filename differs
 
 self.addEventListener('install', (event) => {
