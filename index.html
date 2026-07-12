@@ -4171,9 +4171,9 @@ async function renderPurchasesTab(el){
       <td class="text-right font-mono">${fmt.num(p.quantity||0)}</td>
       <td class="text-right font-mono font-semibold">${fmt.currency(p.invoiceAmount||0)}</td>
       <td class="text-right font-mono text-blue-700">${p.ratePerLitre?'₹'+fmt.num(p.ratePerLitre):'—'}</td>
-      <td><span class="badge text-xs ${statusBadge[p.paymentStatus||'Pending']||'badge-gray'}">${p.paymentStatus||'Pending'}</span></td>
+      <td><span class="badge text-xs ${statusBadge[p.paymentStatus||'Pending']||'badge-gray'}">${p.paymentStatus||'Pending'}${p.paymentStatus==='Partial'?' · Due '+fmt.currency(round2((p.invoiceAmount||0)-(p.paidAmount||0))):''}</span></td>
       <td class="no-print"><div class="flex items-center gap-1 flex-nowrap">
-        ${p.paymentStatus!=='Paid'?`<button onclick="confirmMarkPaid('${p.id}')" class="btn btn-sm btn-green-sm whitespace-nowrap">Mark Paid</button>`:''}
+        ${p.paymentStatus!=='Paid'?`<button onclick="payFuelPurchase('${p.id}')" class="btn btn-sm btn-green-sm whitespace-nowrap">Pay</button>`:''}
         <button onclick="showPurchaseModal('${p.id}')" class="btn btn-sm btn-blue-sm">✏</button>
         <button onclick="deletePurchaseRecord('${p.id}')" class="btn btn-sm btn-red-sm">🗑</button>
       </div></td>
@@ -4216,8 +4216,16 @@ async function showPurchaseModal(id){
       <div><label class="form-label">Quantity (L) *</label><input type="number" id="pm-qty" class="form-input text-right font-mono" step="0.01" min="0.01" value="${p?.quantity||''}" placeholder="0.00" oninput="calcPmRate()"></div>
       <div><label class="form-label">Total Amount ₹</label><input type="number" id="pm-amt" class="form-input text-right font-mono" step="0.01" min="0" value="${p?.invoiceAmount||''}" placeholder="0.00" oninput="calcPmRate()"></div>
       <div><label class="form-label">Rate ₹/L 🔵</label><input type="text" id="pm-rate" class="auto-field form-input text-right font-mono" readonly value="${p?.ratePerLitre?fmt.num(p.ratePerLitre):''}"></div>
-      <div><label class="form-label">Payment Status</label><select id="pm-status" class="form-input"><option ${p?.paymentStatus==='Pending'?'selected':''}>Pending</option><option ${p?.paymentStatus==='Partial'?'selected':''}>Partial</option><option ${p?.paymentStatus==='Paid'?'selected':''}>Paid</option></select></div>
-      <div><label class="form-label">Paid Via</label><select id="pm-mode" class="form-input"><option value="Bank Transfer" ${(p?.mode||'Bank Transfer')==='Bank Transfer'?'selected':''}>Bank Transfer</option><option value="Cash" ${p?.mode==='Cash'?'selected':''}>Cash</option></select></div>
+      ${id?`<div class="col-span-2 text-xs text-slate-400 bg-slate-50 rounded px-3 py-2">
+        Paid so far: <strong>${fmt.currency(p?.paidAmount||0)}</strong> of ${fmt.currency(p?.invoiceAmount||0)}
+        — ${(p?.paidAmount||0)>=(p?.invoiceAmount||0)&&(p?.invoiceAmount||0)>0?'fully paid.':'use the Pay button on the purchase list to record a payment.'}
+      </div>`:`
+      <div><label class="form-label">Paid Amount ₹ <span class="text-slate-400 font-normal">(optional)</span></label>
+        <input type="number" id="pm-paid" class="form-input text-right font-mono" step="0.01" min="0" placeholder="0.00" oninput="calcPmPayStatus()"></div>
+      <div><label class="form-label">Payment Mode</label>
+        <select id="pm-mode" class="form-input"><option value="Cash">Cash</option><option value="UPI">UPI</option><option value="Card">Card</option><option value="Bank Transfer" selected>Bank Transfer</option></select></div>
+      <div class="col-span-2"><label class="form-label">Payment Status</label>
+        <div id="pm-pay-status" class="px-3 py-2 rounded-lg text-xs font-semibold bg-slate-100 text-slate-500">Leave Paid Amount blank if unpaid — you can pay later from the purchase list</div></div>`}
       <div class="col-span-2"><label class="form-label">Remarks</label><textarea id="pm-rem" class="form-input" rows="2">${p?.remarks||''}</textarea></div>
     </div>
     <div class="flex gap-3 justify-end mt-6 pt-4 border-t border-slate-100">
@@ -4228,7 +4236,16 @@ async function showPurchaseModal(id){
   pmFilterTanks();
 }
 function pmFilterTanks(){const prod=document.getElementById('pm-prod')?.value;const sel=document.getElementById('pm-tank');if(!sel)return;Array.from(sel.options).forEach(o=>{o.style.display=(!prod||o.dataset.product===prod)?'':'none';});for(const o of sel.options){if(o.style.display!=='none'){sel.value=o.value;break;}}}
-function calcPmRate(){const q=parseFloat(document.getElementById('pm-qty')?.value)||0;const a=parseFloat(document.getElementById('pm-amt')?.value)||0;const el=document.getElementById('pm-rate');if(el)el.value=q>0&&a>0?fmt.num(a/q):'';}
+function calcPmRate(){const q=parseFloat(document.getElementById('pm-qty')?.value)||0;const a=parseFloat(document.getElementById('pm-amt')?.value)||0;const el=document.getElementById('pm-rate');if(el)el.value=q>0&&a>0?fmt.num(a/q):'';calcPmPayStatus();}
+function calcPmPayStatus(){
+  const total=parseFloat(document.getElementById('pm-amt')?.value)||0;
+  const paid=parseFloat(document.getElementById('pm-paid')?.value)||0;
+  const el=document.getElementById('pm-pay-status');if(!el)return;
+  if(!total){el.textContent='Leave Paid Amount blank if unpaid — you can pay later from the purchase list';el.className='px-3 py-2 rounded-lg text-xs font-semibold bg-slate-100 text-slate-500';return;}
+  if(paid<=0){el.textContent='⏳ Pending — full amount due';el.className='px-3 py-2 rounded-lg text-xs font-semibold bg-red-100 text-red-700';}
+  else if(paid>=total){el.textContent='✓ Fully Paid';el.className='px-3 py-2 rounded-lg text-xs font-semibold bg-green-100 text-green-700';}
+  else{const due=total-paid;el.textContent='◑ Partial — ₹'+due.toFixed(2)+' still due ('+Math.round((paid/total)*100)+'% paid)';el.className='px-3 py-2 rounded-lg text-xs font-semibold bg-amber-100 text-amber-700';}
+}
 
 async function savePurchaseRecord(id){
   const date=document.getElementById('pm-date')?.value;const product=document.getElementById('pm-prod')?.value;
@@ -4237,23 +4254,31 @@ async function savePurchaseRecord(id){
   if(!date||!product||qty<=0){toast('Fill required fields','error');return;}
   const purId=id||`PUR-${Date.now()}`;
   const existing=id?DB.get(`pbms_purchase_${purId}`):null;
-  const newStatus=document.getElementById('pm-status')?.value||'Pending';
-  // Track the date money actually left the bank, separate from the invoice/purchase date —
-  // the bank book is keyed off paidDate so settling an old credit purchase doesn't silently
-  // rewrite an already-closed month's closing balance.
-  let paidDate=existing?.paidDate||null;
-  if(newStatus==='Paid'&&existing?.paymentStatus!=='Paid')paidDate=fmt.today();
-  if(newStatus!=='Paid')paidDate=existing?.paymentStatus==='Paid'?paidDate:null;
+  // payments[] tracks each cash-out event with its own date/mode — the bank book reads
+  // this directly (same pattern as Oil/Lube purchases), so a partial payment shows up
+  // immediately instead of waiting for the whole invoice to be marked Paid.
+  let payments=existing?.payments||[];
+  let paidAmount=existing?.paidAmount||0;
+  if(!existing){
+    // New purchase — an initial payment can optionally be captured right here.
+    const paidNow=parseFloat(document.getElementById('pm-paid')?.value)||0;
+    if(paidNow>amt+0.01){toast('Paid amount exceeds total cost','error');return;}
+    if(paidNow>0){
+      const mode=document.getElementById('pm-mode')?.value||'Bank Transfer';
+      payments=[{date,amount:paidNow,mode,createdAt:new Date().toISOString()}];
+      paidAmount=paidNow;
+    }
+  }
+  const paymentStatus=paidAmount<=0?'Pending':paidAmount>=amt?'Paid':'Partial';
   DB.set(`pbms_purchase_${purId}`,{id:purId,date,product,tankId:document.getElementById('pm-tank')?.value||'',
     invoiceNo:document.getElementById('pm-inv')?.value||'',supplierName:document.getElementById('pm-supp')?.value||'',
     vehicleNo:document.getElementById('pm-veh')?.value||'',quantity:qty,invoiceAmount:amt,ratePerLitre:amt?amt/qty:0,
-    paymentStatus:newStatus,paidDate,
-    mode:document.getElementById('pm-mode')?.value||'Bank Transfer',
+    paymentStatus,paidAmount,payments,
     remarks:document.getElementById('pm-rem')?.value||'',createdAt:existing?.createdAt||new Date().toISOString()});
   await Audit.log(existing?'purchase_edited':'purchase_added','purchase',purId,
-    existing?{before:{quantity:existing.quantity,invoiceAmount:existing.invoiceAmount,paymentStatus:existing.paymentStatus},after:{quantity:qty,invoiceAmount:amt,paymentStatus:newStatus}}
-    :{date,product,quantity:qty,invoiceAmount:amt,supplierName:document.getElementById('pm-supp')?.value||''});
-  toast(`Purchase saved — ${product} ${fmt.num(qty)}L${amt?' · ₹'+fmt.num(amt/qty)+'/L':''}${id?'':' ↗ added to Stock Ledger'}`,'success');
+    existing?{before:{quantity:existing.quantity,invoiceAmount:existing.invoiceAmount,paymentStatus:existing.paymentStatus},after:{quantity:qty,invoiceAmount:amt,paymentStatus}}
+    :{date,product,quantity:qty,invoiceAmount:amt,paidAmount,supplierName:document.getElementById('pm-supp')?.value||''});
+  toast(`Purchase saved — ${product} ${fmt.num(qty)}L${amt?' · ₹'+fmt.num(amt/qty)+'/L':''}${id?'':' ↗ added to Stock Ledger'}${paidAmount>0&&!existing?' · ₹'+fmt.num(paidAmount)+' paid':''}`,'success');
   if(_spCache){if(qty>0)_spCache.purchases[`${date}_${product}`]=(_spCache.purchases[`${date}_${product}`]||0)+qty;}
   closeModal();await renderPurchasesTab(document.getElementById('sp-tab-content'));
 }
@@ -4266,13 +4291,39 @@ async function deletePurchaseRecord(id){
     await renderPurchasesTab(document.getElementById('sp-tab-content'));
   });
 }
-async function confirmMarkPaid(id){
+// Fuel purchase payments — mirrors payOilPurchase/confirmOilPayment exactly, so a
+// supplier invoice can be paid in installments across any modes, each landing in the
+// Bank Book on its own real payment date instead of only once fully settled.
+function payFuelPurchase(id){
   const p=DB.getActive(`pbms_purchase_${id}`);if(!p)return;
-  showConfirm(`Mark as Paid?`,`${p.supplierName||'Supplier'} — ${p.product} ${fmt.num(p.quantity||0)}L — ${fmt.currency(p.invoiceAmount||0)}`,async()=>{
-    p.paymentStatus='Paid';p.paidDate=fmt.today();DB.set(`pbms_purchase_${id}`,p);
-    toast('Purchase marked as Paid — Bank Balance updated','success');
-    await renderPurchasesTab(document.getElementById('sp-tab-content'));
-  },'Confirm Paid','bg-green-600 hover:bg-green-700');
+  const due=Math.max(0,round2((p.invoiceAmount||0)-(p.paidAmount||0)));
+  showModal(`<div class="p-6"><h2 class="text-lg font-bold text-slate-800 mb-4">Pay Fuel Purchase</h2>
+    <div class="bg-slate-50 rounded-lg p-3 mb-4 text-sm">
+      <div class="font-semibold">${p.supplierName||'Supplier'} — ${p.product} ${fmt.num(p.quantity||0)}L</div>
+      ${p.invoiceNo?`<div class="text-xs text-slate-400 mt-0.5">Invoice ${p.invoiceNo}</div>`:''}
+      <div class="text-slate-500 mt-1">Total: ${fmt.currency(p.invoiceAmount||0)} · Paid: ${fmt.currency(p.paidAmount||0)} · Due: <strong class="text-red-600">${fmt.currency(due)}</strong></div>
+    </div>
+    <div><label class="form-label">Payment Amount ₹</label>
+      <input type="number" id="pm-pay-now" class="form-input text-right font-mono" value="${due.toFixed(2)}" max="${due.toFixed(2)}" step="0.01"></div>
+    <div class="mt-3"><label class="form-label">Payment Mode</label>
+      <select id="pm-pay-mode" class="form-input"><option value="Cash">Cash</option><option value="UPI">UPI</option><option value="Card">Card</option><option value="Bank Transfer" selected>Bank Transfer</option></select></div>
+    <div class="text-xs text-blue-700 bg-blue-50 rounded px-3 py-2 mt-3">💳 Posts to the Bank Book on today's date, whatever the mode</div>
+    <div class="flex gap-3 justify-end mt-5 pt-4 border-t border-slate-100">
+      <button onclick="closeModal()" class="btn btn-ghost">Cancel</button>
+      <button onclick="confirmFuelPayment('${id}')" class="btn btn-success">Pay Now</button>
+    </div></div>`);
+}
+async function confirmFuelPayment(id){
+  const amount=parseFloat(document.getElementById('pm-pay-now')?.value)||0;
+  if(amount<=0){toast('Enter amount','error');return;}
+  const p=DB.getActive(`pbms_purchase_${id}`);if(!p)return;
+  const newPaid=round2((p.paidAmount||0)+amount);
+  const newStatus=newPaid>=(p.invoiceAmount||0)?'Paid':'Partial';
+  const payments=[...(p.payments||[]),{date:fmt.today(),amount,mode:document.getElementById('pm-pay-mode')?.value||'Bank Transfer',createdAt:new Date().toISOString()}];
+  DB.set(`pbms_purchase_${id}`,{...p,paidAmount:newPaid,payments,paymentStatus:newStatus});
+  await Audit.log('purchase_paid','purchase',id,{amount,newPaid,newStatus});
+  closeModal();toast('₹'+amount.toFixed(2)+' paid. '+(newStatus==='Paid'?'Fully settled!':'Partial payment recorded.'),'success');
+  await renderPurchasesTab(document.getElementById('sp-tab-content'));
 }
 
 async function downloadPurchasesExcel(){
@@ -5432,7 +5483,7 @@ async function renderCash(el){
   const tab=APP.tabs?.cash||'settlement';
   el.innerHTML=`${pageHeader('Cash & Banking',settings.stationName||'Station')}
   <div class="border-b border-slate-200 mb-5 flex no-print overflow-x-auto">
-    <button data-ctab="settlement"  class="tab-btn ${tab==='settlement'?'active':''}"  onclick="switchCashTab('settlement')">Daily Settlement</button>
+    <button data-ctab="settlement"  class="tab-btn ${tab==='settlement'?'active':''}"  onclick="switchCashTab('settlement')">Daily Bank Book</button>
     <button data-ctab="bankbook"    class="tab-btn ${tab==='bankbook'?'active':''}"    onclick="switchCashTab('bankbook')">Bank Book</button>
   </div>
   <div id="cash-tab-content"></div>`;
@@ -5447,7 +5498,7 @@ function switchCashTab(tab){
 
 async function loadCashTab(tab){
   const el=document.getElementById('cash-tab-content');if(!el)return;
-  if(tab==='settlement')await renderDailySettlement(el);
+  if(tab==='settlement')await renderDailyBankBookTab(el);
   else if(tab==='bankbook')await renderBankBook(el);
 }
 
@@ -5455,207 +5506,108 @@ async function loadCashTab(tab){
 // TAB 1 — DAILY SETTLEMENT
 // ────────────────────────────────────────────────────
 
-async function renderDailySettlement(el){
+async function renderDailyBankBookTab(el){
   const today=fmt.today();
   if(!APP.tabs)APP.tabs={};
   if(!APP.tabs.settlDate)APP.tabs.settlDate=today;
+  const date=APP.tabs.settlDate;
   el.innerHTML=`
-  <div class="flex items-center gap-2 mb-5 no-print">
-    <button onclick="shiftSettlDate(-1)" class="btn btn-ghost btn-sm px-2">◀</button>
-    <input type="date" id="settl-date" class="form-input w-40 text-sm" value="${APP.tabs.settlDate}" max="${today}"
-      onchange="if(!APP.tabs)APP.tabs={};APP.tabs.settlDate=this.value;loadSettlementForDate(this.value)">
-    <button onclick="shiftSettlDate(1)" class="btn btn-ghost btn-sm px-2">▶</button>
-    <span class="text-sm text-slate-400 ml-2">${fmt.date(APP.tabs.settlDate)}</span>
+  <div class="flex items-center gap-2 mb-5 no-print flex-wrap">
+    <button onclick="shiftDailyBankDate(-1)" class="btn btn-ghost btn-sm px-2">◀</button>
+    <input type="date" id="settl-date" class="form-input w-40 text-sm" value="${date}" max="${today}"
+      onchange="goToDailyBankDate(this.value)">
+    <button onclick="shiftDailyBankDate(1)" class="btn btn-ghost btn-sm px-2">▶</button>
+    <span class="text-sm text-slate-400 ml-2">${fmt.date(date)}</span>
+    ${date!==today?`<button onclick="goToDailyBankDate('${today}')" class="btn btn-ghost btn-sm text-xs text-blue-600 ml-auto">Today</button>`:''}
   </div>
   <div id="settl-body"><div class="flex items-center justify-center h-24">
     <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
   </div></div>`;
-  await loadSettlementForDate(APP.tabs.settlDate);
+  await loadDailyBankBookForDate(date);
 }
 
-function shiftSettlDate(dir){
+// Single entry point for changing the viewed date — re-renders the whole
+// nav bar so the label and "Today" button are always correct, whether the
+// person used the prev/next arrows, typed in the date picker, or tapped
+// "Today". (An earlier version patched the DOM piecemeal per-trigger and
+// the date-picker path silently forgot to update the label/Today button.)
+function goToDailyBankDate(val){
+  if(!APP.tabs)APP.tabs={};
+  APP.tabs.settlDate=val;
+  const el=document.getElementById('cash-tab-content');
+  if(el)renderDailyBankBookTab(el);
+}
+
+function shiftDailyBankDate(dir){
   if(!APP.tabs)APP.tabs={};
   const d=new Date(APP.tabs.settlDate);d.setDate(d.getDate()+dir);
   const nd=d.toISOString().split('T')[0];
   if(nd>fmt.today())return;
-  APP.tabs.settlDate=nd;
-  const inp=document.getElementById('settl-date');if(inp)inp.value=nd;
-  const lbl=inp?.parentElement?.querySelector('span.text-slate-400');if(lbl)lbl.textContent=fmt.date(nd);
-  loadSettlementForDate(nd);
+  goToDailyBankDate(nd);
 }
 
-async function loadSettlementForDate(date){
+// Every single transaction for one date — shift settlements and shop sales
+// are already automatic (see buildBankBook), so this page is purely a
+// read-only, pick-a-date view of what actually happened. No "save" step.
+async function loadDailyBankBookForDate(date){
   const el=document.getElementById('settl-body');if(!el)return;
+  el.innerHTML=`<div class="flex items-center justify-center h-24"><div class="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div></div>`;
 
-  // Section A: auto-fetch collections from settled sessions
-  // Grouped by settledDate — the day cash was actually counted and could be
-  // taken to the bank — NOT checkInDate. With the Handover/Settle-Cash split,
-  // a shift can be checked in on one day and settled days later; keying this
-  // off checkInDate would silently attribute that cash to a day that may
-  // already be closed out, and it would never surface here for the manager
-  // to notice. (Legacy records from before this split have no settledDate,
-  // so they fall back to checkOutDate/checkInDate — same as their old behavior.)
-  const sessKeys=DB.listKeys('pbms_session_');
-  const sessions=[];
-  for(const k of sessKeys){
-    const s=DB.get(k);
-    if(!s||s.status!=='Settled')continue;
-    const settleDate=s.settledDate||s.checkOutDate||s.checkInDate;
-    if(settleDate===date)sessions.push(s);
-  }
-
-  const fuelOilCash   =sessions.reduce((s,x)=>s+(x.collections?.cashAmt||0),0);
-  const fuelOilUpi    =sessions.reduce((s,x)=>s+(x.collections?.upiAmt||0),0);
-  const fuelOilCard   =sessions.reduce((s,x)=>s+(x.collections?.cardAmt||0),0);
-  const fuelOilCredit =sessions.reduce((s,x)=>s+(x.collections?.creditAmt||0),0);
-
-  // Shop (retail) sales for this date — payment mode chosen at billing time.
-  // Cash/UPI/Card sales are paid-in-full and settle same-day; Credit sales
-  // stay on the customer ledger until recovered separately.
-  const shopSalesToday=listShopSales().filter(s=>s.date===date);
-  let shopCash=0,shopUpi=0,shopCard=0,shopCredit=0;
-  for(const s of shopSalesToday){
-    const due=shopBalanceDue(s);
-    const mode=(s.payments&&s.payments[0]?.mode)||'';
-    if(due>0.004){shopCredit+=due;}
-    if(mode==='Cash')shopCash+=(s.payments[0].amount||0);
-    else if(mode==='UPI')shopUpi+=(s.payments[0].amount||0);
-    else if(mode==='Card')shopCard+=(s.payments[0].amount||0);
-  }
-
-  // Credit recovery received in Cash today — this joins the same physical
-  // cash drawer as fuel/shop cash, so it must go through this settlement's
-  // Cash Collection → Expenses → Deposit flow too, not straight to the bank.
-  // Non-cash recoveries (UPI/Bank Transfer/Cheque) bypass Daily Settlement
-  // entirely and post directly in Bank Book — see buildBankBook.
-  let creditRecoveryCash=0;
-  for(const p of DB.listActive('pbms_payment_')){
-    if(p.date!==date||p.mode!=='Cash')continue;
-    creditRecoveryCash+=p.amount||0;
-  }
-
-  const cashCollection =fuelOilCash+shopCash+creditRecoveryCash;
-  const upiCollection  =fuelOilUpi+shopUpi;
-  const cardCollection =fuelOilCard+shopCard;
-  const creditSales    =fuelOilCredit+shopCredit;
-  const totalCollected =cashCollection+upiCollection+cardCollection+creditSales;
-
-  // Load existing settlement (if already saved)
-  const saved=DB.get(`pbms_daily_settlement_${date}`);
-  // Expenses, Cash Advances, Loan Repayments and Purchases are no longer
-  // netted against today's cash collection here — regardless of mode
-  // (Cash/Bank Transfer/UPI/Cheque), they post as their own direct outflow
-  // rows in the Bank Book (see buildBankBook). Daily Settlement now only
-  // records what was collected and deposits it to the bank in full.
-  const cashDepositToBank=cashCollection;
-  const noSessions=sessions.length===0;
-  const noCollections=noSessions&&shopSalesToday.length===0&&creditRecoveryCash===0;
+  const{dayRows,openingForDay,closingForDay,totalIn,totalOut}=await buildDailyBankBookData(date);
 
   el.innerHTML=`
   <div class="ldg-pumpslip no-print">
-    <div class="ldg-pumpslip-stamp${saved?'':' open'}">${saved?'SETTLED':'OPEN'}</div>
-    <div style="font-family:var(--font-display);font-weight:600;font-size:1rem;color:var(--ink);">Daily Settlement Slip</div>
-    <div style="font-size:.8rem;color:var(--muted);margin-top:2px;">${fmt.date(date)} · ${sessions.length} session${sessions.length!==1?'s':''} settled · ${shopSalesToday.length} shop sale${shopSalesToday.length!==1?'s':''}</div>
+    <div class="ldg-pumpslip-stamp">BANK BOOK</div>
+    <div style="font-family:var(--font-display);font-weight:600;font-size:1rem;color:var(--ink);">Daily Bank Book</div>
+    <div style="font-size:.8rem;color:var(--muted);margin-top:2px;">${fmt.date(date)} · ${dayRows.length} transaction${dayRows.length!==1?'s':''}</div>
   </div>
-  ${noCollections?`<div class="card p-5 mb-5 text-center text-slate-400">
+
+  <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+    <div class="card p-3 text-center">
+      <div class="text-xs text-slate-400 mb-1">Opening Balance</div>
+      <div class="font-mono font-bold text-slate-700">${fmt.currency(openingForDay)}</div>
+    </div>
+    <div class="card p-3 text-center">
+      <div class="text-xs text-slate-400 mb-1">Total In</div>
+      <div class="font-mono font-bold text-green-700">${fmt.currency(totalIn)}</div>
+    </div>
+    <div class="card p-3 text-center">
+      <div class="text-xs text-slate-400 mb-1">Total Out</div>
+      <div class="font-mono font-bold text-red-600">${fmt.currency(totalOut)}</div>
+    </div>
+    <div class="card p-3 text-center">
+      <div class="text-xs text-slate-400 mb-1">Closing Balance</div>
+      <div class="font-mono font-bold ${closingForDay<0?'text-red-600':'text-blue-700'}">${fmt.currency(closingForDay)}</div>
+    </div>
+  </div>
+
+  ${dayRows.length?`<div class="card overflow-hidden mb-5">
+    <div class="px-4 py-3 border-b border-slate-100 bg-slate-50">
+      <h2 class="font-semibold text-slate-700 text-sm">Every Transaction — ${fmt.date(date)}</h2>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="data-table text-sm"><thead><tr>
+        <th>Time</th><th>Description</th><th>Type</th><th>Ref</th>
+        <th class="text-right">In ₹</th><th class="text-right">Out ₹</th><th class="text-right">Balance ₹</th>
+      </tr></thead><tbody>
+      ${dayRows.map(r=>`<tr>
+        <td class="whitespace-nowrap text-xs text-slate-400">${fmt.timeOf(r.createdAt)||'—'}</td>
+        <td class="max-w-xs text-sm">${r.desc}</td>
+        <td><span class="badge ${bankTypeStyle(r.type)} text-xs">${r.type}</span></td>
+        <td class="text-xs text-slate-400 font-mono">${r.ref||'—'}</td>
+        <td class="text-right font-mono ${r.in>0?'text-green-700':''}">${r.in>0?fmt.currency(r.in):'—'}</td>
+        <td class="text-right font-mono ${r.out>0?'text-red-600':''}">${r.out>0?fmt.currency(r.out):'—'}</td>
+        <td class="text-right font-mono font-semibold ${r.balance<0?'text-red-600':'text-slate-800'}">${fmt.currency(r.balance)}</td>
+      </tr>`).join('')}
+      </tbody></table>
+    </div>
+  </div>`:`<div class="card p-8 text-center text-slate-400 mb-5 text-sm">
     <div class="text-2xl mb-1">📋</div>
-    <p class="text-sm">No settled sessions or shop sales found for ${fmt.date(date)}.</p>
-  </div>`:''}
-
-  <!-- SECTION A -->
-  <div class="card overflow-hidden mb-4">
-    <div class="px-4 py-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
-      <h2 class="font-semibold text-slate-700 text-sm">Collections — ${fmt.date(date)}</h2>
-      <span class="text-xs text-slate-400">${sessions.length} shift session${sessions.length!==1?'s':''} · ${shopSalesToday.length} shop sale${shopSalesToday.length!==1?'s':''}</span>
-    </div>
-    ${sessions.some(s=>s.checkInDate!==date)?`<div class="px-4 py-2 border-b border-slate-100 bg-blue-50 text-xs text-blue-700">
-      ℹ Includes ${sessions.filter(s=>s.checkInDate!==date).length} shift${sessions.filter(s=>s.checkInDate!==date).length!==1?'s':''} that started on an earlier date and was settled today (${sessions.filter(s=>s.checkInDate!==date).map(s=>`${s.employeeName} — ${fmt.date(s.checkInDate)}`).join(', ')}).
-    </div>`:''}
-    <div class="divide-y divide-slate-100 text-sm">
-      ${[['Cash Collection','cash-coll',cashCollection,'text-blue-700'],
-         ['UPI Collection','upi-coll',upiCollection,'text-indigo-600'],
-         ['Card Collection','card-coll',cardCollection,'text-teal-600'],
-         ['Credit Sales','credit-coll',creditSales,'text-slate-600']].map(([l,id,v,cls])=>`
-      <div class="flex items-center justify-between px-4 py-2.5">
-        <span class="text-slate-500">${l}</span>
-        <span class="font-mono font-semibold ${cls}">${fmt.currency(v)} <span class="text-xs text-slate-400 font-normal">🔵</span></span>
-      </div>`).join('')}
-      <div class="flex items-center justify-between px-4 py-3 bg-slate-50 font-semibold">
-        <span class="text-slate-700">Total Collected</span>
-        <span class="font-mono text-slate-800">${fmt.currency(totalCollected)} <span class="text-xs text-slate-400 font-normal">🔵</span></span>
-      </div>
-    </div>
-    ${shopSalesToday.length?`<div class="px-4 py-2.5 border-t border-slate-100 text-xs text-slate-400">
-      Includes shop billing: ${fmt.currency(shopCash)} cash, ${fmt.currency(shopUpi)} UPI, ${fmt.currency(shopCard)} card, ${fmt.currency(shopCredit)} credit
-    </div>`:''}
-    ${creditRecoveryCash>0?`<div class="px-4 py-2.5 border-t border-slate-100 text-xs text-slate-400">
-      Includes ${fmt.currency(creditRecoveryCash)} credit-recovery cash received today
-    </div>`:''}
-  </div>
-
-  <!-- SECTION C: What goes to bank -->
-  <div class="card overflow-hidden mb-5">
-    <div class="px-4 py-3 border-b border-slate-100 bg-green-50">
-      <h2 class="font-semibold text-green-700 text-sm">Today's Bank Inflows</h2>
-      <p class="text-xs text-green-600 mt-0.5">Full cash collection deposits to the bank — expenses, cash advances, loan repayments and purchases are recorded separately in the Bank Book, whatever their payment mode.</p>
-    </div>
-    <div class="divide-y divide-slate-100 text-sm">
-      <div class="flex items-center justify-between px-4 py-2.5 text-slate-500">
-        <span>Cash Deposit <span class="text-xs text-slate-400">(= full Cash Collection)</span></span>
-        <span id="bank-cash-dep" class="font-mono font-semibold">${fmt.currency(cashDepositToBank)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
-      </div>
-      <div class="flex items-center justify-between px-4 py-2.5 text-indigo-600">
-        <span>UPI (direct to bank)</span>
-        <span class="font-mono font-semibold">${fmt.currency(upiCollection)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
-      </div>
-      <div class="flex items-center justify-between px-4 py-2.5 text-teal-600">
-        <span>Card (direct to bank)</span>
-        <span class="font-mono font-semibold">${fmt.currency(cardCollection)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
-      </div>
-      <div class="flex items-center justify-between px-4 py-3 bg-green-50 font-bold border-t-2 border-green-200">
-        <span class="text-green-700">Total Bank Inflow Today</span>
-        <span id="bank-total-inflow" class="font-mono text-green-700">${fmt.currency(cashDepositToBank+upiCollection+cardCollection)} <span class="text-xs font-normal text-slate-400">🔵</span></span>
-      </div>
-    </div>
-  </div>
-
-  <input type="hidden" id="s-cash" value="${cashCollection}">
-  <input type="hidden" id="s-upi"  value="${upiCollection}">
-  <input type="hidden" id="s-card" value="${cardCollection}">
-  <input type="hidden" id="s-credit" value="${creditSales}">
-  <input type="hidden" id="s-total" value="${totalCollected}">
-
-  ${saved?`<div class="mb-3 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 text-xs flex items-center gap-2">
-    ⚠ Settlement already saved for this date. Saving again will overwrite it.
-  </div>`:''}
-
-  <button onclick="saveSettlement('${date}')"
-    class="btn btn-orange w-full py-3 text-base font-semibold no-print"
-    ${noCollections?'disabled':''}>
-    ${saved?'Update Settlement':'Save Settlement'}
-  </button>`;
+    No transactions recorded for ${fmt.date(date)}.
+  </div>`}
+  <p class="text-xs text-slate-400 text-center no-print">Shift settlements, shop sales, expenses, purchases, credit &amp; loan activity all appear here automatically — nothing to save on this page.</p>`;
 }
 
-async function saveSettlement(date){
-  const cashCollection =parseFloat(document.getElementById('s-cash')?.value)||0;
-  const upiCollection  =parseFloat(document.getElementById('s-upi')?.value)||0;
-  const cardCollection =parseFloat(document.getElementById('s-card')?.value)||0;
-  const creditSales    =parseFloat(document.getElementById('s-credit')?.value)||0;
-  const totalCollected =parseFloat(document.getElementById('s-total')?.value)||0;
-
-  // Full cash collection deposits to the bank — expenses, cash advances,
-  // loan repayments and purchases no longer net against it here (any mode)
-  // since they post as their own direct outflow rows in the Bank Book.
-  const cashDepositToBank=cashCollection;
-  const totalBankInflowToday=cashDepositToBank+upiCollection+cardCollection;
-  DB.set(`pbms_daily_settlement_${date}`,{
-    date,cashCollection,upiCollection,cardCollection,creditSales,totalCollected,
-    cashDepositToBank,totalBankInflowToday
-  });
-
-  toast(`Settlement saved. Bank credited ${fmt.currency(totalBankInflowToday)}.`,'success');
-  await loadSettlementForDate(date);
-}
 
 // ────────────────────────────────────────────────────
 // TAB 2 — BANK BOOK
@@ -5764,22 +5716,7 @@ async function loadBankBook(){
 
   const{rows,stats,pending}=await buildBankBook(fromDate,toDate);
   const balance=rows.length?rows[rows.length-1].balance:stats.openingBalance;
-  const pendingTotal=pending.reduce((s,p)=>s+(p.invoiceAmount||0),0);
-
-  const typeStyle={
-    'Opening':          'badge-gray',
-    'Cash Deposit':     'badge-blue',
-    'UPI':              'text-indigo-700 bg-indigo-100',
-    'Card':             'text-teal-700 bg-teal-100',
-    'Credit Recovery':  'text-green-700 bg-green-100',
-    'Loan Received':    'text-purple-700 bg-purple-100',
-    'Loan Repaid':      'badge-orange',
-    'Cash Advance Out': 'text-orange-700 bg-orange-100',
-    'Fuel Payment':     'badge-red',
-    'Oil Payment':      'text-amber-700 bg-amber-100',
-    'Bank Expense':     'badge-amber',
-    'Incentive':          'text-green-700 bg-green-100'
-  };
+  const pendingTotal=pending.reduce((s,p)=>s+(p.dueAmount!=null?p.dueAmount:(p.invoiceAmount||0)),0);
 
   el.innerHTML=`
   <!-- Summary strip -->
@@ -5802,7 +5739,7 @@ async function loadBankBook(){
       ${rows.map(r=>`<tr>
         <td class="whitespace-nowrap text-xs">${fmt.date(r.date)}<div class="text-slate-400">${fmt.timeOf(r.createdAt)}</div></td>
         <td class="max-w-xs text-sm">${r.desc}</td>
-        <td><span class="badge ${typeStyle[r.type]||'badge-gray'} text-xs">${r.type}</span></td>
+        <td><span class="badge ${bankTypeStyle(r.type)} text-xs">${r.type}</span></td>
         <td class="text-xs text-slate-400 font-mono">${r.ref||'—'}</td>
         <td class="text-right font-mono ${r.in>0?'text-green-700':''}">${r.in>0?fmt.currency(r.in):'—'}</td>
         <td class="text-right font-mono ${r.out>0?'text-red-600':''}">${r.out>0?fmt.currency(r.out):'—'}</td>
@@ -5824,7 +5761,7 @@ async function loadBankBook(){
         <div class="text-xs font-bold text-slate-400 uppercase pt-1">Money In</div>
         ${[['Cash Deposits',stats.cashDep],['UPI Collections',stats.upi],
            ['Card Collections',stats.card],
-           ['Credit Recovery (Bank)',stats.credit],
+           ['Credit Recovery',stats.credit],
            ['Shop Credit Recovery',stats.shopIn],
            ['Loan Received',stats.loanIn],
            ['Incentive',stats.incentiveDueIn]].filter(([,v])=>v>0).map(([l,v])=>
@@ -5857,29 +5794,72 @@ async function loadBankBook(){
   <!-- Pending fuel payments -->
   ${pending.length?`<div class="card overflow-hidden" style="border-color:#fde68a">
     <div class="px-4 py-3 border-b border-amber-100 bg-amber-50">
-      <h3 class="font-semibold text-amber-700 text-sm">⚠ Pending Fuel Payments — not deducted from balance</h3>
+      <h3 class="font-semibold text-amber-700 text-sm">⚠ Pending Fuel Payments — due amount not yet deducted from balance</h3>
     </div>
     <div class="overflow-x-auto"><table class="data-table text-sm"><thead><tr>
-      <th>Date</th><th>Supplier</th><th>Product</th>
-      <th class="text-right">Amount ₹</th><th class="no-print">Action</th>
+      <th>Date</th><th>Supplier</th><th>Product</th><th>Status</th>
+      <th class="text-right">Due ₹</th><th class="no-print">Action</th>
     </tr></thead><tbody>
     ${pending.map(p=>`<tr>
       <td class="whitespace-nowrap">${fmt.date(p.date)}</td>
       <td>${p.supplierName||'—'}</td>
       <td><span class="badge badge-blue text-xs">${p.product}</span></td>
-      <td class="text-right font-mono font-semibold text-amber-700">${fmt.currency(p.invoiceAmount||0)}</td>
+      <td><span class="badge text-xs ${p.paymentStatus==='Partial'?'text-blue-700 bg-blue-50':'text-amber-700 bg-amber-50'}">${p.paymentStatus||'Pending'}${p.paymentStatus==='Partial'?' · '+fmt.currency(p.paidAmount||0)+' paid':''}</span></td>
+      <td class="text-right font-mono font-semibold text-amber-700">${fmt.currency(p.dueAmount!=null?p.dueAmount:(p.invoiceAmount||0))}</td>
       <td class="no-print">
-        <button onclick="markPurchasePaid('${p.id}')" class="btn btn-sm btn-green-sm">Mark Paid</button>
+        <button onclick="payFuelPurchase('${p.id}')" class="btn btn-sm btn-green-sm">Pay</button>
       </td>
     </tr>`).join('')}
     </tbody></table></div>
     <div class="px-4 py-3 border-t border-amber-100 bg-amber-50 flex items-center justify-between text-sm flex-wrap gap-2">
-      <span class="text-amber-700 font-medium">Total Pending: ${fmt.currency(pendingTotal)}</span>
+      <span class="text-amber-700 font-medium">Total Due: ${fmt.currency(pendingTotal)}</span>
       <span class="text-amber-600">Balance after payment:
         <strong class="${(balance-pendingTotal)<0?'text-red-600':'text-green-700'}">${fmt.currency(balance-pendingTotal)}</strong>
       </span>
     </div>
   </div>`:''}`;
+}
+
+function bankTypeStyle(type){
+  const map={
+    'Opening':          'badge-gray',
+    'Cash Deposit':     'badge-blue',
+    'UPI':              'text-indigo-700 bg-indigo-100',
+    'Card':             'text-teal-700 bg-teal-100',
+    'Credit Recovery':  'text-green-700 bg-green-100',
+    'Loan Received':    'text-purple-700 bg-purple-100',
+    'Loan Repaid':      'badge-orange',
+    'Cash Advance Out': 'text-orange-700 bg-orange-100',
+    'Fuel Payment':     'badge-red',
+    'Oil Payment':      'text-amber-700 bg-amber-100',
+    'Expense':          'badge-amber',
+    'Shop Payment':     'text-rose-700 bg-rose-100',
+    'Shop Recovery':    'text-lime-700 bg-lime-100',
+    'Incentive':        'text-green-700 bg-green-100',
+    'Cash Withdrawal':  'badge-red'
+  };
+  return map[type]||'badge-gray';
+}
+
+// Single-day slice of the Bank Book — every transaction on one date, with
+// the true running balance carried forward (not just that day's own net
+// change). Reuses buildBankBook over the full history up to `date` so the
+// Opening/Closing figures are always accurate, not reset to zero.
+async function buildDailyBankBookData(date){
+  const ob=DB.get('pbms_bank_opening_balance');
+  const from=(ob&&ob.asOfDate&&ob.asOfDate<date)?ob.asOfDate:date;
+  const{rows}=await buildBankBook(from,date);
+  let openingForDay=0;
+  const dayRows=[];
+  for(const r of rows){
+    if(r.date<date)openingForDay=r.balance;
+    else if(r.date===date)dayRows.push(r);
+  }
+  dayRows.sort((a,b)=>(a.createdAt||'').localeCompare(b.createdAt||''));
+  const totalIn=dayRows.reduce((s,r)=>s+(r.in||0),0);
+  const totalOut=dayRows.reduce((s,r)=>s+(r.out||0),0);
+  const closingForDay=round2(openingForDay+totalIn-totalOut);
+  return{dayRows,openingForDay,closingForDay,totalIn,totalOut};
 }
 
 async function buildBankBook(fromDate,toDate){
@@ -5899,10 +5879,10 @@ async function buildBankBook(fromDate,toDate){
   }
 
   // 2. Fuel/oil session collections + Shop sale collections — computed
-  // directly from the underlying records (Cash, UPI, Card), not from a
-  // saved Daily Settlement record. This means the Bank Book always reflects
-  // reality the moment a shift is settled or a shop sale is billed, without
-  // needing anyone to separately open Daily Settlement and click Save.
+  // directly from the underlying records (Cash, UPI, Card). This means the
+  // Bank Book always reflects reality the moment a shift is settled or a
+  // shop sale is billed — there's no separate "save" step anywhere anymore
+  // (see Daily Bank Book, which is a pure read-only view of this same data).
   // Dated by settlement date (the day cash was actually counted and could
   // be banked) for sessions, and by sale date for shop billing.
   const dayCashBB={},dayUpiBB={},dayCardBB={};
@@ -5923,12 +5903,8 @@ async function buildBankBook(fromDate,toDate){
     else if(mode==='UPI')dayUpiBB[ss.date]=(dayUpiBB[ss.date]||0)+amt;
     else if(mode==='Card')dayCardBB[ss.date]=(dayCardBB[ss.date]||0)+amt;
   }
-  // Credit recovery received in Cash joins the same physical drawer as
-  // fuel/shop cash, so it deposits alongside it on the same day.
-  for(const p of DB.listActive('pbms_payment_')){
-    if(!p||p.mode!=='Cash'||p.date<fromDate||p.date>toDate)continue;
-    dayCashBB[p.date]=(dayCashBB[p.date]||0)+(p.amount||0);
-  }
+  // Credit Recovery is posted as its own row for every mode, including Cash
+  // — see section 3 below — so it's intentionally not folded in here.
   const settlCreatedAt={};
   for(const k of DB.listKeys('pbms_daily_settlement_')){const s=DB.get(k);if(s)settlCreatedAt[s.date]=s.createdAt;}
   for(const dt of Object.keys(dayCashBB).sort()){
@@ -5960,24 +5936,17 @@ async function buildBankBook(fromDate,toDate){
     }
   }
 
-  // 3. Credit payments — use pre-loaded custMap (no extra DB calls)
-  // Cash-mode recoveries are NOT posted here directly — that cash lands in the
-  // same drawer as fuel/shop cash, so it flows through Daily Settlement's Cash
-  // Collection first, and reaches the bank via that "Cash Deposit" row once
-  // settled (see loadSettlementForDate). Only non-cash modes are a genuine,
-  // independent bank movement and get posted here directly.
+  // 3. Credit payments — any mode, including Cash, posts as its own row now.
   for(const p of DB.listActive('pbms_payment_')){
     if(p.date<fromDate||p.date>toDate)continue;
-    if(p.mode==='Cash')continue;
     const custName=custMap[p.customerId]?.name||p.customerName||'Customer';
-    rows.push({date:p.date,desc:`${custName} — ${p.mode||'NEFT'} payment`,type:'Credit Recovery',ref:p.referenceNo||'',in:p.amount||0,out:0,createdAt:p.createdAt});
+    rows.push({date:p.date,desc:`${custName} — ${p.mode||'Cash'} payment`,type:'Credit Recovery',ref:p.referenceNo||'',in:p.amount||0,out:0,createdAt:p.createdAt});
     stats.credit+=p.amount||0;stats.totalIn+=p.amount||0;
   }
 
-  // 4. Loans received — use pre-loaded loanMap (only Bank Transfer touches the bank)
+  // 4. Loans received — any mode, including Cash
   for(const l of Object.values(loanMap)){
     if(l.startDate<fromDate||l.startDate>toDate)continue;
-    if((l.receivedVia||'Bank Transfer')==='Cash')continue;
     rows.push({date:l.startDate,desc:`${l.lenderName||'Lender'} — loan disbursement`,type:'Loan Received',ref:'',in:l.principalAmount||0,out:0,createdAt:l.createdAt});
     stats.loanIn+=l.principalAmount||0;stats.totalIn+=l.principalAmount||0;
   }
@@ -6004,18 +5973,25 @@ async function buildBankBook(fromDate,toDate){
   }
 
   // 7. Paid fuel purchases — any mode posts to the bank directly — dated by the
-  // actual payment date (paidDate), not the invoice/purchase date, so settling an old
-  // credit purchase doesn't retroactively rewrite an already-closed month's balance.
+  // actual payment date, not the invoice/purchase date, so settling an old credit
+  // purchase doesn't retroactively rewrite an already-closed month's balance.
+  // payments[] holds each individual cash-out event (any mode) — a Partial invoice
+  // now posts whatever was actually paid instead of showing nothing until the whole
+  // invoice is settled. Legacy records saved before this existed (a single paidDate/
+  // mode with no breakdown) fall back to one row on their old paid date.
   const purKeys=DB.listActive('pbms_purchase_');const pending=[];
   for(const p of purKeys){
     if(!p)continue;
-    const payDate=p.paidDate||p.date; // legacy records (pre-paidDate) fall back to purchase date
-    if(p.paymentStatus==='Paid'){
-      if(payDate<fromDate||payDate>toDate)continue;
-      const amt=p.invoiceAmount||0;
-      rows.push({date:payDate,desc:`${p.supplierName||'Supplier'} — ${p.product} ${fmt.litres(p.quantity||0)}${p.invoiceNo?' · '+p.invoiceNo:''}`,type:'Fuel Payment',ref:p.invoiceNo||'',in:0,out:amt,createdAt:p.createdAt});
-      stats.fuelOut+=amt;stats.totalOut+=amt;
-    } else {if(p.date>=fromDate&&p.date<=toDate)pending.push(p);}
+    const pays=p.payments&&p.payments.length?p.payments
+      :(p.paymentStatus==='Paid'&&(p.invoiceAmount||0)>0?[{date:p.paidDate||p.date,amount:p.invoiceAmount,mode:p.mode,createdAt:p.createdAt}]:[]);
+    for(const pay of pays){
+      if(!pay||pay.date<fromDate||pay.date>toDate||(pay.amount||0)<=0)continue;
+      rows.push({date:pay.date,desc:`${p.supplierName||'Supplier'} — ${p.product} ${fmt.litres(p.quantity||0)}${p.invoiceNo?' · '+p.invoiceNo:''}`,type:'Fuel Payment',ref:p.invoiceNo||'',in:0,out:pay.amount,createdAt:pay.createdAt||p.createdAt});
+      stats.fuelOut+=pay.amount;stats.totalOut+=pay.amount;
+    }
+    const paidSoFar=p.paidAmount!=null?p.paidAmount:(p.paymentStatus==='Paid'?(p.invoiceAmount||0):0);
+    const due=round2((p.invoiceAmount||0)-paidSoFar);
+    if(due>0.004&&p.date>=fromDate&&p.date<=toDate)pending.push({...p,dueAmount:due});
   }
 
   // 8. Oil/lube paid purchases (outflow) — any mode, one row per actual payment date
@@ -6052,44 +6028,31 @@ async function buildBankBook(fromDate,toDate){
     }
   }
 
-  // 9c. Shop (retail) sale payments recorded against credit invoices —
-  // non-cash recovery (cash/UPI/card sales at billing time already flow in
-  // via the Daily Settlement rows above, so only count non-Cash payments
-  // that were recorded after invoice creation to avoid double counting)
+  // 9c. Shop (retail) sale payments recorded against credit invoices — any
+  // mode, including Cash. Only the 2nd+ payment on an invoice is handled
+  // here; the 1st payment (at billing time) is already in section 2 above.
   const shopSaleKeys=listShopSales();
   for(const s of shopSaleKeys){
     if(!s||!s.payments||s.payments.length<2)continue;
     for(let i=1;i<s.payments.length;i++){
       const pay=s.payments[i];
       if(!pay||pay.date<fromDate||pay.date>toDate||(pay.amount||0)<=0)continue;
-      if(!pay.mode||pay.mode==='Cash')continue;
-      rows.push({date:pay.date,desc:`Shop invoice ${s.invoiceNo||''} — credit recovery (${pay.mode})`,type:'Shop Recovery',ref:s.invoiceNo||'',in:pay.amount,out:0,createdAt:pay.createdAt||s.createdAt});
+      rows.push({date:pay.date,desc:`Shop invoice ${s.invoiceNo||''} — credit recovery (${pay.mode||'Cash'})`,type:'Shop Recovery',ref:s.invoiceNo||'',in:pay.amount,out:0,createdAt:pay.createdAt||s.createdAt});
       stats.shopIn=(stats.shopIn||0)+pay.amount;stats.totalIn+=pay.amount;
     }
   }
 
-  // 10. Incentive dues (inflow — company incentives, only Bank Transfer mode)
-  const idKeys=DB.listKeys('pbms_incentive_due_');
-  for(const k of idKeys){
-    const d=DB.get(k);if(!d||d.date<fromDate||d.date>toDate)continue;
-    if((d.receivedVia||'Bank Transfer')==='Cash')continue;
+  // 10. Incentive dues (inflow — company incentives) — any mode, including Cash
+  for(const d of DB.listActive('pbms_incentive_due_')){
+    if(!d||d.date<fromDate||d.date>toDate)continue;
     rows.push({date:d.date,desc:`Incentive — ${d.name}`,type:'Incentive',ref:'',in:d.amount||0,out:0,createdAt:d.createdAt});
     stats.incentiveDueIn+=d.amount||0;stats.totalIn+=d.amount||0;
   }
 
   rows.sort((a,b)=>(a.date||'').localeCompare(b.date||'')||(a.type==='Opening'?-1:0));
   let bal=stats.openingBalance;
-  rows.forEach(r=>{if(r.type!=='Opening'){bal+=r.in-r.out;}r.balance=r.type==='Opening'?r.in:bal;});
+  rows.forEach(r=>{if(r.type!=='Opening'){bal=round2(bal+r.in-r.out);}r.balance=r.type==='Opening'?r.in:bal;});
   return{rows,stats,pending};
-}
-
-async function markPurchasePaid(id){
-  const p=DB.getActive(`pbms_purchase_${id}`);if(!p)return;
-  showConfirm('Mark as Paid',`Mark ${p.supplierName||'this purchase'} (${fmt.currency(p.invoiceAmount||0)}) as paid? This will deduct from the bank balance.`,async()=>{
-    p.paymentStatus='Paid';p.paidDate=fmt.today();DB.set(`pbms_purchase_${id}`,p);
-    toast('Marked paid — bank balance updated','success');
-    await loadBankBook();
-  });
 }
 
 async function downloadBankBookExcel(){
@@ -6266,8 +6229,7 @@ function showAddExpenseModal(){
 }
 
 async function renderIncentiveDueTab(el){
-  const idKeys=DB.listKeys('pbms_incentive_due_');
-  const incentiveDues=[];for(const k of idKeys){const d=DB.get(k);if(d)incentiveDues.push(d);}
+  const incentiveDues=DB.listActive('pbms_incentive_due_').slice();
   incentiveDues.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   const idTotal=incentiveDues.reduce((s,d)=>s+(d.amount||0),0);
   const today=fmt.today();
@@ -6415,11 +6377,7 @@ async function saveIncentiveDue(){
   if(!name){toast('Enter a name/description','error');return;}
   if(amt<=0){toast('Enter a valid amount','error');return;}
   const id=`ID-${Date.now()}`;
-  DB.set(`pbms_incentive_due_${id}`,{id,date,name,amount:amt,receivedVia});
-  if(receivedVia==='Bank Transfer'){
-    const bk=DB.get('pbms_bank_balance')||{balance:0};
-    DB.set('pbms_bank_balance',{...bk,balance:(bk.balance||0)+amt});
-  }
+  DB.set(`pbms_incentive_due_${id}`,{id,date,name,amount:amt,receivedVia,createdAt:new Date().toISOString()});
   await Audit.log('incentive_due_added','incentive_due',id,{name,amount:amt,receivedVia});
   toast(`${fmt.currency(amt)} incentive recorded (${receivedVia})`,'success');
   ['id-name','id-amt'].forEach(fid=>{const e=document.getElementById(fid);if(e)e.value='';});
@@ -6427,8 +6385,11 @@ async function saveIncentiveDue(){
 }
 
 async function deleteIncentiveDue(id){
-  showConfirm('Delete Incentive','Remove this incentive record? Bank balance will NOT be reversed automatically.',async()=>{
-    DB.del(`pbms_incentive_due_${id}`);toast('Incentive deleted','success');
+  showConfirm('Delete Incentive','This removes the incentive from the Bank Book and is recorded in the audit log.',async()=>{
+    const rec=DB.get(`pbms_incentive_due_${id}`);
+    if(rec)DB.set(`pbms_incentive_due_${id}`,{...rec,deleted:true,deletedAt:new Date().toISOString(),deletedBy:APP.userEmail||'Manager'});
+    await Audit.log('incentive_due_deleted','incentive_due',id,{name:rec?.name,amount:rec?.amount,date:rec?.date});
+    toast('Incentive deleted','success');
     await renderIncentiveDueTab(document.getElementById('exp-tab-content'));
   });
 }
@@ -6782,7 +6743,7 @@ function computeDailyReportData(date){
   let loanReceivedAll=0;
   for(const l of DB.listActive('pbms_loan_')){if(l&&l.startDate===date)loanReceivedAll+=(l.principalAmount||0);}
   let incentiveAll=0;
-  for(const k of DB.listKeys('pbms_incentive_due_')){const d=DB.get(k);if(d&&d.date===date)incentiveAll+=(d.amount||0);}
+  for(const d of DB.listActive('pbms_incentive_due_')){if(d&&d.date===date)incentiveAll+=(d.amount||0);}
   let purchasePaidTotal=0;
   for(const p of purKeys){if(p&&p.date===date&&p.paymentStatus==='Paid')purchasePaidTotal+=(p.invoiceAmount||0);}
   const salesNetCollected=fuelOilCash+fuelOilUpi+fuelOilCard+shopCash+shopUpi+shopCard;
@@ -8191,8 +8152,18 @@ async function downloadMonthlyExcel(){
   }
   const expKeys=DB.listActive('pbms_expense_');const dayExp={};
   for(const e of expKeys){if(e&&e.date.startsWith(mStr)){dayExp[e.date]=(dayExp[e.date]||0)+(e.amount||0);}}
-  const settlKeysEx=DB.listKeys('pbms_daily_settlement_');const dayDepEx={};
-  for(const k of settlKeysEx){const s=DB.get(k);if(s&&s.date.startsWith(mStr)){dayDepEx[s.date]=(dayDepEx[s.date]||0)+(s.cashDepositToBank||0);}}
+  const dayDepEx={};
+  for(const k of sessKeys){
+    const s=DB.get(k);if(!s||s.status!=='Settled')continue;
+    const settleDateEx=s.settledDate||s.checkOutDate||s.checkInDate;
+    if(!settleDateEx||!settleDateEx.startsWith(mStr))continue;
+    dayDepEx[settleDateEx]=(dayDepEx[settleDateEx]||0)+(s.collections?.cashAmt||0);
+  }
+  for(const ss of listShopSales()){
+    if(!ss||!ss.date||!ss.date.startsWith(mStr))continue;
+    const modeEx=(ss.payments&&ss.payments[0]?.mode)||'';
+    if(modeEx==='Cash')dayDepEx[ss.date]=(dayDepEx[ss.date]||0)+(ss.payments[0].amount||0);
+  }
   const rows=dailyData.filter(d=>d.totalAmt>0||dayStats[d.date]).map(d=>{
     const row={'Date':fmt.date(d.date)};
     products.forEach(p=>{row[`${p.id} (L)`]=d.byProduct[p.id]||0;});
@@ -8244,10 +8215,24 @@ async function loadMonthlyReport(monthStr){
     if(!dayStats[settleDate])dayStats[settleDate]={se:0};
     dayStats[settleDate].se+=s.shortageExcess||0;
   }
-  // Fetch deposits from Daily Settlements
-  const settlKeys2=DB.listKeys('pbms_daily_settlement_');
+  // Cash deposits — computed directly from settled sessions + shop cash
+  // sales (same logic as buildBankBook's Cash Deposit row), not from saved
+  // Daily Settlement records — Daily Bank Book no longer creates those,
+  // since everything posts automatically now. Keyed by settlement date
+  // (the day cash was actually counted/bankable), not check-in date.
   const dayDep={};
-  for(const k of settlKeys2){const s=DB.get(k);if(s&&s.date.startsWith(monthStr)){dayDep[s.date]=(dayDep[s.date]||0)+(s.cashDepositToBank||0);}}
+  for(const k of sessKeys){
+    const s=DB.get(k);
+    if(!s||s.status!=='Settled')continue;
+    const settleDateDep=s.settledDate||s.checkOutDate||s.checkInDate;
+    if(!settleDateDep||!settleDateDep.startsWith(monthStr))continue;
+    dayDep[settleDateDep]=(dayDep[settleDateDep]||0)+(s.collections?.cashAmt||0);
+  }
+  for(const ss of listShopSales()){
+    if(!ss||!ss.date||!ss.date.startsWith(monthStr))continue;
+    const mode0=(ss.payments&&ss.payments[0]?.mode)||'';
+    if(mode0==='Cash')dayDep[ss.date]=(dayDep[ss.date]||0)+(ss.payments[0].amount||0);
+  }
   const expKeys=DB.listActive('pbms_expense_');
   const dayExp={};
   for(const e of expKeys){if(e&&e.date.startsWith(monthStr)){dayExp[e.date]=(dayExp[e.date]||0)+(e.amount||0);}}
@@ -8726,9 +8711,8 @@ async function loadProfitReport(){
       purchaseCost+=qty*periodRate;
     }
     // Incentive dues for this period (company incentives → added to revenue)
-    const incentiveDues=DB.listKeys('pbms_incentive_due_');
     let incentiveDueAmt=0;
-    for(const k of incentiveDues){const d=DB.get(k);if(d&&d.date>=from&&d.date<=to)incentiveDueAmt+=(d.amount||0);}
+    for(const d of DB.listActive('pbms_incentive_due_')){if(d&&d.date>=from&&d.date<=to)incentiveDueAmt+=(d.amount||0);}
     purchaseCost+=oilCost;
     const totalRevenue=fuelRevenue+oilRevenue-discountAmt+incentiveDueAmt;
     const grossProfit=totalRevenue-purchaseCost;
@@ -10928,7 +10912,7 @@ async function renderBillingForm(el,id){
         </select>
       </div>
     </div>
-    <p class="ldg-item-tip">Cash / UPI / Card are recorded as paid-in-full and flow into today's Daily Settlement. Credit leaves the balance due on the customer's ledger.</p>
+    <p class="ldg-item-tip">Cash / UPI / Card are recorded as paid-in-full and flow into today's Daily Bank Book automatically. Credit leaves the balance due on the customer's ledger.</p>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
       <span class="ldg-serif" style="font-size:1.1rem;font-weight:600;color:var(--ink);">Items</span>
       <button class="btn btn-ghost btn-sm" onclick="addBillItemRow()">+ Add item</button>
