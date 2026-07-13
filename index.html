@@ -398,6 +398,13 @@ body .text-2xl,body .text-3xl,body .text-4xl{font-family:var(--font-display);}
 .data-table tbody tr:hover{background:var(--blue-bg)!important;}
 .data-table td{padding:9px 10px;color:var(--ink);vertical-align:middle;}
 .form-input{border:1px solid var(--line);border-radius:var(--radius-btn,8px);padding:10px 13px;font-size:14px;width:100%;min-height:44px;color:var(--ink);background:var(--card);transition:border-color .15s;font-family:var(--font-body,inherit);}
+/* Hide the native up/down spinner on every number input across the app —
+   it sits right on top of the value and is very easy to accidentally
+   click/tap, silently nudging a reading up or down by one without anyone
+   noticing (this is what was shown in the closing-reading screenshot). */
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}
+input[type=number]{-moz-appearance:textfield;}
 .form-input:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 2px rgba(201,163,95,.25);}
 .form-input.error{border-color:var(--red)!important;background:var(--red-bg)!important;}
 .form-label{display:block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:6px;}
