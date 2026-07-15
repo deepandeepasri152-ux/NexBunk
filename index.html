@@ -653,7 +653,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
   <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
 </button>
 <div id="modal-overlay" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-[110] flex items-start justify-center overflow-y-auto py-4 px-3 sm:py-6 sm:px-4">
-  <div id="modal-container" class="bg-white rounded-xl shadow-2xl w-full max-w-2xl my-auto"></div>
+  <div id="modal-container" class="bg-white rounded-xl shadow-2xl w-full max-w-2xl"></div>
 </div>
 <main id="content">
 </main>
@@ -4547,7 +4547,7 @@ async function showCreditSaleModal(custId){
       <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600">✕</button>
     </div>
     <p class="text-xs text-slate-400 mb-4">Add one row per pending sale or advance, then save them all together.</p>
-    <div id="cs-rows-wrap" class="flex flex-col gap-4"></div>
+    <div id="cs-rows-wrap" class="gap-4" style="display:flex;flex-direction:column;gap:1rem;"></div>
     <button type="button" onclick="csAddRow()" class="btn btn-sm btn-ghost mt-3">+ Add Row</button>
     <div class="flex gap-3 justify-end mt-6 pt-4 border-t border-slate-100">
       <button onclick="closeModal()" class="btn btn-ghost">Cancel</button>
