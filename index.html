@@ -4517,148 +4517,219 @@ async function deleteCustomer(id){
   });
 }
 
+// Credit Entry supports multiple pending rows in one go — a customer often
+// runs several fill-ups (and sometimes a cash advance) before anyone gets
+// round to recording them, so the modal keeps an in-memory list of rows
+// (_csRows) that are all validated and saved together as one batch.
+let _csRows=[];
+let _csCustId=null;
+
+function _csBlankRow(type){
+  const products=(APP.settings?.products||[]).filter(p=>p.active);
+  const prod=products.find(p=>p.id===type)||products[0]||{id:'HSD',name:'HSD',rate:0};
+  return{
+    rid:'r'+Date.now().toString(36)+Math.random().toString(36).slice(2,7),
+    type:prod.id,
+    link:'qty',
+    date:fmt.today(),qty:'',rate:prod.rate||'',amt:'',veh:'',driver:'',rem:'',
+    advDate:fmt.today(),advAmt:'',advVia:'Cash',advRef:'',advNote:''
+  };
+}
+
 async function showCreditSaleModal(custId){
-  _csLink='qty';
+  _csCustId=custId;
   const cust=DB.getActive(`pbms_customer_${custId}`);
-  const settings=APP.settings||{};
-  const products=(settings.products||[]).filter(p=>p.active);
-  const firstProd=products[0]||{id:'HSD',name:'HSD',rate:0};
-  showModal(`<div class="p-6">
+  _csRows=[_csBlankRow()];
+  if(_csRows[0])_csRows[0].veh=cust?.vehicleNo||'';
+  showModal(`<div class="modal-xl p-6">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-lg font-bold text-slate-800">Credit Entry — ${cust?.name||''}</h2>
       <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600">✕</button>
     </div>
-    <div class="mb-5">
-      <label class="form-label">Sale Type</label>
-      <div class="flex gap-2 flex-wrap mt-1">
-        ${products.map((p,i)=>`<button type="button" id="cst-${p.id}"
-          class="btn btn-sm ${i===0?'btn-primary':'btn-ghost'}"
-          onclick="setCSSaleType('${p.id}')">${p.name||p.id}</button>`).join('')}
-        <button type="button" id="cst-CashAdvance"
-          class="btn btn-sm btn-ghost" onclick="setCSSaleType('CashAdvance')">💰 Cash Advance</button>
-      </div>
-    </div>
-
-    <div id="cs-fuel-fields" class="grid grid-cols-2 gap-4">
-      <div><label class="form-label">Date *</label>
-        <input type="date" id="cs-date" class="form-input" value="${fmt.today()}" max="${fmt.today()}"></div>
-      <div><label class="form-label">Qty (L) *</label>
-        <input type="number" id="cs-qty" class="form-input text-right font-mono" step="0.01" min="0.01" placeholder="0.00" oninput="calcCreditSale('qty')"></div>
-      <div><label class="form-label">Rate ₹/L</label>
-        <input type="number" id="cs-rate" class="form-input text-right font-mono" step="0.01" min="0" placeholder="0.00" value="${firstProd.rate||''}" oninput="calcCreditSale('rate')"></div>
-      <div><label class="form-label">Amount ₹ *</label>
-        <input type="number" id="cs-amt" class="form-input text-right font-mono" step="0.01" min="0.01" placeholder="0.00" oninput="calcCreditSale('amt')"></div>
-      <div class="col-span-2 -mt-2"><p class="text-xs text-slate-400">Enter either Qty or Amount — the other fills in automatically from the Rate.</p></div>
-      <div><label class="form-label">Vehicle No.</label>
-        <input type="text" id="cs-veh" class="form-input" value="${cust?.vehicleNo||''}" placeholder="TN01AB1234"></div>
-      <div><label class="form-label">Driver Name</label>
-        <input type="text" id="cs-driver" class="form-input" placeholder="Optional"></div>
-      <div><label class="form-label">Remarks</label>
-        <input type="text" id="cs-rem" class="form-input" placeholder="Optional"></div>
-    </div>
-
-    <div id="cs-advance-fields" class="hidden grid grid-cols-2 gap-4">
-      <div><label class="form-label">Date *</label>
-        <input type="date" id="cs-adv-date" class="form-input" value="${fmt.today()}" max="${fmt.today()}"></div>
-      <div><label class="form-label">Amount ₹ *</label>
-        <input type="number" id="cs-adv-amt" class="form-input text-right font-mono" step="0.01" min="0.01" placeholder="0.00"></div>
-      <div><label class="form-label">Given Via</label>
-        <select id="cs-adv-via" class="form-input" onchange="toggleAdvRef()">
-          <option>Cash</option><option>NEFT</option><option>UPI</option><option>Cheque</option>
-        </select></div>
-      <div id="cs-adv-ref-wrap" style="display:none"><label class="form-label">Reference No.</label>
-        <input type="text" id="cs-adv-ref" class="form-input" placeholder="UPI ref / cheque no."></div>
-      <div class="col-span-2"><label class="form-label">Note <span class="text-slate-400 font-normal">(reason)</span></label>
-        <input type="text" id="cs-adv-note" class="form-input" placeholder="Emergency cash advance…"></div>
-    </div>
-
-    <input type="hidden" id="cs-sale-type" value="${firstProd.id}">
+    <p class="text-xs text-slate-400 mb-4">Add one row per pending sale or advance, then save them all together.</p>
+    <div id="cs-rows-wrap" class="flex flex-col gap-4"></div>
+    <button type="button" onclick="csAddRow()" class="btn btn-sm btn-ghost mt-3">+ Add Row</button>
     <div class="flex gap-3 justify-end mt-6 pt-4 border-t border-slate-100">
       <button onclick="closeModal()" class="btn btn-ghost">Cancel</button>
-      <button onclick="saveCreditSale('${custId}')" class="btn btn-orange">Save Entry</button>
+      <button onclick="saveCreditSale('${custId}')" class="btn btn-orange">Save All Entries</button>
     </div>
   </div>`,()=>loadCreditTab('credit'));
+  csRenderRows();
 }
 
-function setCSSaleType(type){
-  document.getElementById('cs-sale-type').value=type;
-  document.querySelectorAll('[id^="cst-"]').forEach(b=>{
-    b.className=`btn btn-sm ${b.id===`cst-${type}`?'btn-primary':'btn-ghost'}`;
-  });
-  const isCash=type==='CashAdvance';
-  document.getElementById('cs-fuel-fields')?.classList.toggle('hidden',isCash);
-  document.getElementById('cs-advance-fields')?.classList.toggle('hidden',!isCash);
-  if(!isCash){
+function csAddRow(){
+  const last=_csRows[_csRows.length-1];
+  const row=_csBlankRow(last?.type);
+  row.veh=last?.veh||'';
+  _csRows.push(row);
+  csRenderRows();
+}
+
+function csRemoveRow(rid){
+  if(_csRows.length<=1){toast('At least one row is required','error');return;}
+  _csRows=_csRows.filter(r=>r.rid!==rid);
+  csRenderRows();
+}
+
+function csRenderRows(){
+  const wrap=document.getElementById('cs-rows-wrap');if(!wrap)return;
+  const products=(APP.settings?.products||[]).filter(p=>p.active);
+  wrap.innerHTML=_csRows.map((row,idx)=>{
+    const isCash=row.type==='CashAdvance';
+    return`<div class="border border-slate-200 rounded-lg p-5 relative" data-rid="${row.rid}">
+      <div class="flex items-center justify-between mb-3">
+        <span class="text-xs font-semibold text-slate-400">ROW ${idx+1}</span>
+        ${_csRows.length>1?`<button type="button" onclick="csRemoveRow('${row.rid}')" class="text-slate-400 hover:text-red-600 text-sm">✕ Remove</button>`:''}
+      </div>
+      <div class="mb-4">
+        <label class="form-label">Sale Type</label>
+        <div class="flex gap-2 flex-wrap mt-1">
+          ${products.map(p=>`<button type="button" data-rid="${row.rid}" data-type="${p.id}"
+            class="btn btn-sm ${row.type===p.id?'btn-primary':'btn-ghost'}"
+            onclick="csSetRowType('${row.rid}','${p.id}')">${p.name||p.id}</button>`).join('')}
+          <button type="button" class="btn btn-sm ${isCash?'btn-primary':'btn-ghost'}"
+            onclick="csSetRowType('${row.rid}','CashAdvance')">💰 Cash Advance</button>
+        </div>
+      </div>
+      ${!isCash?`
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div><label class="form-label">Date *</label>
+          <input type="date" data-rid="${row.rid}" data-f="date" class="form-input" value="${row.date}" max="${fmt.today()}" onchange="csUpdate('${row.rid}','date',this.value)"></div>
+        <div><label class="form-label">Qty (L) *</label>
+          <input type="number" data-rid="${row.rid}" data-f="qty" class="form-input text-right font-mono" step="0.01" min="0.01" placeholder="0.00" value="${row.qty}" oninput="csCalc('${row.rid}','qty',this.value)"></div>
+        <div><label class="form-label">Rate ₹/L</label>
+          <input type="number" data-rid="${row.rid}" data-f="rate" class="form-input text-right font-mono" step="0.01" min="0" placeholder="0.00" value="${row.rate}" oninput="csCalc('${row.rid}','rate',this.value)"></div>
+        <div><label class="form-label">Amount ₹ *</label>
+          <input type="number" data-rid="${row.rid}" data-f="amt" class="form-input text-right font-mono" step="0.01" min="0.01" placeholder="0.00" value="${row.amt}" oninput="csCalc('${row.rid}','amt',this.value)"></div>
+        <div class="col-span-1 sm:col-span-2 -mt-2"><p class="text-xs text-slate-400">Enter either Qty or Amount — the other fills in automatically from the Rate.</p></div>
+        <div><label class="form-label">Vehicle No.</label>
+          <input type="text" data-rid="${row.rid}" data-f="veh" class="form-input" value="${row.veh}" placeholder="TN01AB1234" onchange="csUpdate('${row.rid}','veh',this.value)"></div>
+        <div><label class="form-label">Driver Name</label>
+          <input type="text" data-rid="${row.rid}" data-f="driver" class="form-input" value="${row.driver}" placeholder="Optional" onchange="csUpdate('${row.rid}','driver',this.value)"></div>
+        <div><label class="form-label">Remarks</label>
+          <input type="text" data-rid="${row.rid}" data-f="rem" class="form-input" value="${row.rem}" placeholder="Optional" onchange="csUpdate('${row.rid}','rem',this.value)"></div>
+      </div>`:`
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div><label class="form-label">Date *</label>
+          <input type="date" data-rid="${row.rid}" data-f="advDate" class="form-input" value="${row.advDate}" max="${fmt.today()}" onchange="csUpdate('${row.rid}','advDate',this.value)"></div>
+        <div><label class="form-label">Amount ₹ *</label>
+          <input type="number" data-rid="${row.rid}" data-f="advAmt" class="form-input text-right font-mono" step="0.01" min="0.01" placeholder="0.00" value="${row.advAmt}" onchange="csUpdate('${row.rid}','advAmt',this.value)"></div>
+        <div><label class="form-label">Given Via</label>
+          <select data-rid="${row.rid}" data-f="advVia" class="form-input" onchange="csUpdate('${row.rid}','advVia',this.value)">
+            ${['Cash','NEFT','UPI','Cheque'].map(v=>`<option ${row.advVia===v?'selected':''}>${v}</option>`).join('')}
+          </select></div>
+        <div style="display:${row.advVia&&row.advVia!=='Cash'?'':'none'}"><label class="form-label">Reference No.</label>
+          <input type="text" data-rid="${row.rid}" data-f="advRef" class="form-input" value="${row.advRef}" placeholder="UPI ref / cheque no." onchange="csUpdate('${row.rid}','advRef',this.value)"></div>
+        <div class="col-span-1 sm:col-span-2"><label class="form-label">Note <span class="text-slate-400 font-normal">(reason)</span></label>
+          <input type="text" data-rid="${row.rid}" data-f="advNote" class="form-input" value="${row.advNote}" placeholder="Emergency cash advance…" onchange="csUpdate('${row.rid}','advNote',this.value)"></div>
+      </div>`}
+    </div>`;
+  }).join('');
+}
+
+function _csRow(rid){return _csRows.find(r=>r.rid===rid);}
+
+function csUpdate(rid,field,value){
+  const row=_csRow(rid);if(!row)return;
+  row[field]=value;
+  if(field==='advVia')csRenderRows();
+}
+
+function csSetRowType(rid,type){
+  const row=_csRow(rid);if(!row)return;
+  row.type=type;
+  if(type!=='CashAdvance'){
     const products=(APP.settings?.products||[]).filter(p=>p.active);
     const prod=products.find(p=>p.id===type);
-    if(prod){const rateEl=document.getElementById('cs-rate');if(rateEl){rateEl.value=prod.rate||'';calcCreditSale('rate');}}
+    if(prod){row.rate=prod.rate||'';row.link='qty';csRecalc(row);}
   }
+  csRenderRows();
 }
 
-function toggleAdvRef(){
-  const via=document.getElementById('cs-adv-via')?.value;
-  const wrap=document.getElementById('cs-adv-ref-wrap');
-  if(wrap)wrap.style.display=(via&&via!=='Cash')?'':'none';
+// Qty and Amount within a row are linked both ways: some customers buy for a
+// fixed quantity, others for a fixed amount — whichever field was last
+// hand-edited is the source of truth, and the other is derived via Rate.
+function csCalc(rid,src,value){
+  const row=_csRow(rid);if(!row)return;
+  if(src==='qty'){row.qty=value;row.link='qty';}
+  else if(src==='amt'){row.amt=value;row.link='amt';}
+  else if(src==='rate'){row.rate=value;}
+  csRecalc(row);
+  const qtyEl=document.querySelector(`[data-rid="${rid}"][data-f="qty"]`);
+  const amtEl=document.querySelector(`[data-rid="${rid}"][data-f="amt"]`);
+  if(qtyEl&&document.activeElement!==qtyEl)qtyEl.value=row.qty;
+  if(amtEl&&document.activeElement!==amtEl)amtEl.value=row.amt;
 }
 
-// Credit Entry's Qty and Amount fields are linked both ways: some customers
-// buy for a fixed quantity ("fill 20L"), others for a fixed amount
-// ("₹500 worth") — whichever one the person actually types into is treated
-// as the source of truth, and the other field is derived from it via Rate.
-// _csLink remembers which field was last hand-edited so a Rate change (which
-// isn't itself a source) knows which direction to recompute in.
-let _csLink='qty';
-function calcCreditSale(src){
-  if(src==='qty'||src==='amt')_csLink=src;
-  const qtyEl=document.getElementById('cs-qty'),rateEl=document.getElementById('cs-rate'),amtEl=document.getElementById('cs-amt');
-  if(!qtyEl||!rateEl||!amtEl)return;
-  const rate=parseFloat(rateEl.value)||0;
-  if(_csLink==='amt'){
-    const amt=parseFloat(amtEl.value)||0;
-    qtyEl.value=(rate>0&&amt>0)?(amt/rate).toFixed(2):'';
+function csRecalc(row){
+  const rate=parseFloat(row.rate)||0;
+  if(row.link==='amt'){
+    const amt=parseFloat(row.amt)||0;
+    row.qty=(rate>0&&amt>0)?(amt/rate).toFixed(2):'';
   } else {
-    const qty=parseFloat(qtyEl.value)||0;
-    amtEl.value=(rate>0&&qty>0)?(qty*rate).toFixed(2):'';
+    const qty=parseFloat(row.qty)||0;
+    row.amt=(rate>0&&qty>0)?(qty*rate).toFixed(2):'';
   }
 }
 
 async function saveCreditSale(custId){
-  const saleType=document.getElementById('cs-sale-type')?.value||'HSD';
+  if(!_csRows.length){toast('Add at least one row','error');return;}
   const cust=DB.getActive(`pbms_customer_${custId}`);
-  const saleId=`CSALE-${Date.now()}`;
+  const prepared=[];
 
-  if(saleType==='CashAdvance'){
-    const date=document.getElementById('cs-adv-date')?.value;
-    const amount=parseFloat(document.getElementById('cs-adv-amt')?.value)||0;
-    const givenVia=document.getElementById('cs-adv-via')?.value||'Cash';
-    const referenceNo=document.getElementById('cs-adv-ref')?.value||'';
-    const note=document.getElementById('cs-adv-note')?.value||'';
-    if(!date||amount<=0){toast('Enter date and amount','error');return;}
-    DB.set(`pbms_credit_sale_${saleId}`,{id:saleId,customerId:custId,
-      customerName:cust?.name||'',date,saleType:'CashAdvance',product:'Cash',
-      quantity:0,rate:0,amount,givenVia,referenceNo,note,status:'Unpaid',createdAt:new Date().toISOString()});
-    await Audit.log('credit_sale_added','credit_sale',saleId,{customerId:custId,customerName:cust?.name,saleType:'CashAdvance',amount});
-    const routeMsg=givenVia==='Cash'?'Deducted from today\'s cash settlement.':'Deducted from bank balance.';
-    toast(`Cash advance of ${fmt.currency(amount)} recorded. ${routeMsg}`,'success');
-  } else {
-    const date=document.getElementById('cs-date')?.value;
-    const product=saleType;
-    const rate=parseFloat(document.getElementById('cs-rate')?.value)||0;
-    const qtyField=parseFloat(document.getElementById('cs-qty')?.value)||0;
-    const amtField=parseFloat(document.getElementById('cs-amt')?.value)||0;
-    if(!date||!product||rate<=0||(qtyField<=0&&amtField<=0)){toast('Fill all required fields','error');return;}
-    // Whichever field the person actually typed into is authoritative (avoids
-    // rounding drift from re-deriving it back through the other field).
-    const amount=_csLink==='amt'?amtField:qtyField*rate;
-    const qty=_csLink==='amt'?(rate>0?amtField/rate:0):qtyField;
-    DB.set(`pbms_credit_sale_${saleId}`,{id:saleId,customerId:custId,
-      customerName:cust?.name||'',date,saleType:product,product,quantity:qty,rate,amount,
-      vehicleNo:document.getElementById('cs-veh')?.value||'',
-      driverName:document.getElementById('cs-driver')?.value||'',
-      remarks:document.getElementById('cs-rem')?.value||'',status:'Unpaid',createdAt:new Date().toISOString()});
-    await Audit.log('credit_sale_added','credit_sale',saleId,{customerId:custId,customerName:cust?.name,product,quantity:qty,amount:qty*rate});
-    toast('Credit sale added','success');
+  // Validate every row first — an all-or-nothing save means a mistake in
+  // row 3 can't silently drop row 1 and 2, or leave a half-saved batch.
+  for(let i=0;i<_csRows.length;i++){
+    const row=_csRows[i];
+    const rowLabel=`Row ${i+1}`;
+    if(row.type==='CashAdvance'){
+      const amount=parseFloat(row.advAmt)||0;
+      if(!row.advDate||amount<=0){toast(`${rowLabel}: enter date and amount`,'error');return;}
+      prepared.push({kind:'advance',date:row.advDate,amount,givenVia:row.advVia||'Cash',
+        referenceNo:row.advRef||'',note:row.advNote||''});
+    } else {
+      const rate=parseFloat(row.rate)||0;
+      const qtyField=parseFloat(row.qty)||0;
+      const amtField=parseFloat(row.amt)||0;
+      if(!row.date||!row.type||rate<=0||(qtyField<=0&&amtField<=0)){toast(`${rowLabel}: fill all required fields`,'error');return;}
+      const amount=row.link==='amt'?amtField:qtyField*rate;
+      const qty=row.link==='amt'?(rate>0?amtField/rate:0):qtyField;
+      prepared.push({kind:'fuel',date:row.date,product:row.type,quantity:qty,rate,amount,
+        vehicleNo:row.veh||'',driverName:row.driver||'',remarks:row.rem||''});
+    }
   }
+
+  // All rows validated — now persist them together.
+  let cashAdvTotal=0,cashAdvVia=null,cashAdvMixed=false;
+  for(let i=0;i<prepared.length;i++){
+    const p=prepared[i];
+    const saleId=`CSALE-${Date.now()}-${i}`;
+    if(p.kind==='advance'){
+      DB.set(`pbms_credit_sale_${saleId}`,{id:saleId,customerId:custId,
+        customerName:cust?.name||'',date:p.date,saleType:'CashAdvance',product:'Cash',
+        quantity:0,rate:0,amount:p.amount,givenVia:p.givenVia,referenceNo:p.referenceNo,note:p.note,
+        status:'Unpaid',createdAt:new Date().toISOString()});
+      await Audit.log('credit_sale_added','credit_sale',saleId,{customerId:custId,customerName:cust?.name,saleType:'CashAdvance',amount:p.amount});
+      cashAdvTotal+=p.amount;
+      if(cashAdvVia===null)cashAdvVia=p.givenVia;else if(cashAdvVia!==p.givenVia)cashAdvMixed=true;
+    } else {
+      DB.set(`pbms_credit_sale_${saleId}`,{id:saleId,customerId:custId,
+        customerName:cust?.name||'',date:p.date,saleType:p.product,product:p.product,
+        quantity:p.quantity,rate:p.rate,amount:p.amount,
+        vehicleNo:p.vehicleNo,driverName:p.driverName,remarks:p.remarks,
+        status:'Unpaid',createdAt:new Date().toISOString()});
+      await Audit.log('credit_sale_added','credit_sale',saleId,{customerId:custId,customerName:cust?.name,product:p.product,quantity:p.quantity,amount:p.amount});
+    }
+  }
+
+  const n=prepared.length;
+  let msg=n===1?'Credit entry added':`${n} credit entries added`;
+  if(cashAdvTotal>0){
+    const routeMsg=cashAdvMixed?'':(cashAdvVia==='Cash'?' Deducted from today\'s cash settlement.':' Deducted from bank balance.');
+    msg+=` (incl. ${fmt.currency(cashAdvTotal)} cash advance).${routeMsg}`;
+  }
+  toast(msg,'success');
+  _csRows=[];
   closeModal();await loadCreditTab('credit');
 }
 
