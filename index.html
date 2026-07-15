@@ -4547,7 +4547,7 @@ async function showCreditSaleModal(custId){
       <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600">✕</button>
     </div>
     <p class="text-xs text-slate-400 mb-4">Add one row per pending sale or advance, then save them all together.</p>
-    <div id="cs-rows-wrap" class="gap-4" style="display:flex;flex-direction:column;gap:1rem;"></div>
+    <div id="cs-rows-wrap" style="display:flex;flex-direction:column;gap:1rem;"></div>
     <button type="button" onclick="csAddRow()" class="btn btn-sm btn-ghost mt-3">+ Add Row</button>
     <div class="flex gap-3 justify-end mt-6 pt-4 border-t border-slate-100">
       <button onclick="closeModal()" class="btn btn-ghost">Cancel</button>
@@ -4700,7 +4700,7 @@ async function saveCreditSale(custId){
   }
 
   // All rows validated — now persist them together.
-  let cashAdvTotal=0,cashAdvVia=null,cashAdvMixed=false;
+  let cashAdvTotal=0;
   for(let i=0;i<prepared.length;i++){
     const p=prepared[i];
     const saleId=`CSALE-${Date.now()}-${i}`;
@@ -4711,7 +4711,6 @@ async function saveCreditSale(custId){
         status:'Unpaid',createdAt:new Date().toISOString()});
       await Audit.log('credit_sale_added','credit_sale',saleId,{customerId:custId,customerName:cust?.name,saleType:'CashAdvance',amount:p.amount});
       cashAdvTotal+=p.amount;
-      if(cashAdvVia===null)cashAdvVia=p.givenVia;else if(cashAdvVia!==p.givenVia)cashAdvMixed=true;
     } else {
       DB.set(`pbms_credit_sale_${saleId}`,{id:saleId,customerId:custId,
         customerName:cust?.name||'',date:p.date,saleType:p.product,product:p.product,
@@ -4725,8 +4724,7 @@ async function saveCreditSale(custId){
   const n=prepared.length;
   let msg=n===1?'Credit entry added':`${n} credit entries added`;
   if(cashAdvTotal>0){
-    const routeMsg=cashAdvMixed?'':(cashAdvVia==='Cash'?' Deducted from today\'s cash settlement.':' Deducted from bank balance.');
-    msg+=` (incl. ${fmt.currency(cashAdvTotal)} cash advance).${routeMsg}`;
+    msg+=` (incl. ${fmt.currency(cashAdvTotal)} cash advance, recorded against customer balance).`;
   }
   toast(msg,'success');
   _csRows=[];
