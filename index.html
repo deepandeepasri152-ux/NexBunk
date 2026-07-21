@@ -513,8 +513,14 @@ body.auth-locked{overflow:hidden;height:100vh;}
 @media(max-width:479px){
   .session-coll-grid{grid-template-columns:repeat(2,1fr)!important;}
 }
-::-webkit-scrollbar{width:5px;height:5px;}
-::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px;}
+::-webkit-scrollbar{width:22px;height:22px;}
+::-webkit-scrollbar-track{background:#f1f5f9;}
+::-webkit-scrollbar-thumb{background:#94a3b8;border-radius:10px;border:4px solid #f1f5f9;background-clip:padding-box;min-height:40px;}
+::-webkit-scrollbar-thumb:hover{background:#64748b;background-clip:padding-box;}
+::-webkit-scrollbar-thumb:active{background:#475569;background-clip:padding-box;}
+::-webkit-scrollbar-corner{background:#f1f5f9;}
+*{scrollbar-width:auto;scrollbar-color:#94a3b8 #f1f5f9;}
+.overflow-x-auto,.overflow-y-auto,.overflow-auto{scrollbar-gutter:stable;}
 @page{size:A4 landscape;margin:10mm;}
 @media print{
   #sidebar,#navbar,.no-print{display:none!important;}
@@ -1301,7 +1307,7 @@ const fmt={
 
 const AVATAR_COLORS=['bg-blue-600','bg-amber-500','bg-green-600','bg-purple-600','bg-teal-600','bg-pink-600'];
 function aColor(i){return AVATAR_COLORS[i%AVATAR_COLORS.length];}
-function aInitials(n){return(n||'?').split(' ').slice(0,2).map(w=>w[0]||'').join('').toUpperCase();}
+function aInitials(n){const s=(n||'').trim();if(!s)return'?';return s.split(' ').filter(Boolean).slice(0,2).map(w=>w[0]||'').join('').toUpperCase()||'?';}
 function uid(){return 'pbms_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,7);}
 function cryptoId(){try{return crypto.randomUUID();}catch{return uid();}}
 function esc(s){s=(s===undefined||s===null)?'':String(s);return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -2862,15 +2868,14 @@ async function renderStaffReportsTab(el){
   staff.sort((a,b)=>a.name.localeCompare(b.name));
   el.innerHTML=`<div class="flex flex-wrap items-end gap-3 mb-5 no-print">
     <div><label class="form-label text-xs">From</label>
-      <input type="date" id="sr-from" class="form-input text-sm" value="${fromDefault}" max="${today}"></div>
+      <input type="date" id="sr-from" class="form-input text-sm" value="${fromDefault}" max="${today}" onchange="applyStaffReport()"></div>
     <div><label class="form-label text-xs">To</label>
-      <input type="date" id="sr-to" class="form-input text-sm" value="${today}" max="${today}"></div>
+      <input type="date" id="sr-to" class="form-input text-sm" value="${today}" max="${today}" onchange="applyStaffReport()"></div>
     <div><label class="form-label text-xs">Employee</label>
-      <select id="sr-emp" class="form-input text-sm">
+      <select id="sr-emp" class="form-input text-sm" onchange="applyStaffReport()">
         <option value="all">All Employees</option>
         ${staff.map(s=>`<option value="${s.id}">${s.name}</option>`).join('')}
       </select></div>
-    <button onclick="applyStaffReport()" class="btn btn-primary btn-sm">Apply</button>
   </div>
   <div id="sr-table"></div>`;
   await applyStaffReport();
@@ -4450,14 +4455,17 @@ async function renderCreditManagement(el){
     </div>
     <button onclick="showAddCustomerModal()" class="no-print btn btn-primary">+ Add Customer</button>
   </div>
+  <div class="flex items-center gap-2 mb-3 no-print">
+    <input id="cust-search" class="form-input" style="max-width:260px" placeholder="Search customers…" oninput="filterRows('cust-table','cust-search')">
+  </div>
   <div class="card overflow-hidden" id="cust-table-wrap">
-    ${customers.length?`<div class="overflow-x-auto"><table class="data-table"><thead><tr>
+    ${customers.length?`<div class="overflow-x-auto"><table class="data-table" id="cust-table"><thead><tr>
       <th>Customer</th><th>Phone</th><th>Credit Limit</th><th class="text-right">Account Balance</th><th>Status</th><th class="no-print" style="min-width:230px">Actions</th>
     </tr></thead><tbody>
     ${customers.map((c,i)=>{
       const bal=balances[i];
       const due=bal<0?-bal:0;
-      const overLimit=c.creditLimit&&due>c.creditLimit;
+      const overLimit=c.creditLimit!=null&&due>c.creditLimit;
       const balCls=bal<0?'text-red-600':bal>0?'text-green-700':'text-slate-400';
       const balLabel=bal<0?`Due: ${fmt.currency(due)}`:bal>0?`Advance: ${fmt.currency(bal)}`:'Settled';
       const statusBadge=bal===0?'<span class="badge badge-green">Settled</span>':bal>0?'<span class="badge badge-blue">Advance</span>':overLimit?'<span class="badge badge-red">Over Limit</span>':'<span class="badge badge-amber">Due</span>';
@@ -4467,7 +4475,7 @@ async function renderCreditManagement(el){
           <div><div class="font-medium">${c.name}</div><div class="text-xs text-slate-400">${c.vehicleNo||''}</div></div>
         </div></td>
         <td>${c.phone||'—'}</td>
-        <td>${c.creditLimit?fmt.currency(c.creditLimit):'Unlimited'}</td>
+        <td>${c.creditLimit!=null?fmt.currency(c.creditLimit):'Unlimited'}</td>
         <td class="text-right font-semibold ${balCls}">${balLabel}</td>
         <td>${statusBadge}</td>
         <td class="no-print"><div class="flex items-center gap-1 flex-nowrap">
@@ -4494,7 +4502,7 @@ async function showAddCustomerModal(id){
       <div class="col-span-2"><label class="form-label">Name *</label><input type="text" id="cust-name" class="form-input" value="${cust?.name||''}" placeholder="Customer / Company Name"></div>
       <div><label class="form-label">Phone</label><input type="text" id="cust-phone" class="form-input" value="${cust?.phone||''}" placeholder="9876543210"></div>
       <div><label class="form-label">Vehicle No.</label><input type="text" id="cust-veh" class="form-input" value="${cust?.vehicleNo||''}" placeholder="TN01AB1234"></div>
-      <div><label class="form-label">Credit Limit ₹ (blank=unlimited)</label><input type="number" id="cust-limit" class="form-input text-right font-mono" value="${cust?.creditLimit||''}" min="0" placeholder="0"></div>
+      <div><label class="form-label">Credit Limit ₹ (blank=unlimited)</label><input type="number" id="cust-limit" class="form-input text-right font-mono" value="${cust?.creditLimit!=null?cust.creditLimit:''}" min="0" placeholder="0"></div>
       <div><label class="form-label">Address</label><input type="text" id="cust-addr" class="form-input" value="${cust?.address||''}" placeholder="Street, City"></div>
     </div>
     <div class="flex gap-3 justify-end mt-6 pt-4 border-t border-slate-100">
@@ -6690,8 +6698,7 @@ async function renderDailyReport(el){
   if(!APP.tabs.dailyDate)APP.tabs.dailyDate=today;
   el.innerHTML=`
   <div class="flex flex-wrap items-center gap-3 mb-5 no-print">
-    <input type="date" id="dr-date" class="form-input w-40 text-sm" value="${APP.tabs.dailyDate}" max="${today}">
-    <button onclick="loadDailyReport()" class="btn btn-primary btn-sm">Load</button>
+    <input type="date" id="dr-date" class="form-input w-40 text-sm" value="${APP.tabs.dailyDate}" max="${today}" onchange="loadDailyReport()">
     <div class="relative no-print ml-auto" id="dr-dl-wrap">
       <button onclick="toggleDrDl()" class="btn btn-ghost btn-sm flex items-center gap-2">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
@@ -7146,7 +7153,6 @@ async function loadReportTab(tab){
       <div class="flex items-center gap-3">
         <label class="text-sm font-medium text-slate-600">Month:</label>
         <input type="month" id="rpt-month" class="form-input w-40 text-sm" value="${mStr}" onchange="loadMonthlyReport(this.value)">
-        <button onclick="loadMonthlyReport(document.getElementById('rpt-month').value)" class="btn btn-sm btn-primary">Load</button>
       </div>
       <div class="relative no-print" id="monthly-dl-wrap">
         <button onclick="toggleMonthlyDl()" class="btn btn-ghost flex items-center gap-2">
@@ -7828,12 +7834,12 @@ async function generateCreditRegister(){
 
   const summaryRows=Object.entries(byCustomer).map(([cid,d])=>{
     const outPaise=Money.sub(d.totalSalePaise,d.totalPaidPaise);
-    const creditLimit=d.cust.creditLimit||0;
+    const creditLimit=d.cust.creditLimit;
     const today=new Date();
     const latestDate=d.latestTxDate?new Date(d.latestTxDate):null;
     const daysOut=latestDate?Math.floor((today-latestDate)/(1000*60*60*24)):null;
     const overdue=daysOut!=null&&daysOut>30&&outPaise>0;
-    const overLimit=creditLimit>0&&Money.fromPaise(outPaise)>creditLimit;
+    const overLimit=creditLimit!=null&&Money.fromPaise(outPaise)>creditLimit;
     return `<tr style="${(overdue||overLimit)?'background:#fff5f5':''}">
       <td style="padding:3px 6px;font-weight:600;font-size:10px">${d.cust.name||cid}</td>
       <td style="font-size:10px">${d.cust.vehicleNo||'—'}</td>
@@ -7841,8 +7847,8 @@ async function generateCreditRegister(){
       <td style="text-align:right;font-size:10px">₹${fmt.num(Money.fromPaise(d.totalSalePaise))}</td>
       <td style="text-align:right;font-size:10px">₹${fmt.num(Money.fromPaise(d.totalPaidPaise))}</td>
       <td style="text-align:right;font-weight:700;font-size:10px;color:${outPaise>0?'#b91c1c':'#15803d'}">₹${fmt.num(Money.fromPaise(outPaise))}</td>
-      <td style="text-align:right;font-size:10px">${creditLimit>0?'₹'+fmt.num(creditLimit):'—'}</td>
-      <td style="text-align:center;font-size:10px;font-weight:700;color:${overLimit?'#b91c1c':'#374151'}">${overLimit?'OVER LIMIT ⚠':creditLimit>0?'OK':'—'}</td>
+      <td style="text-align:right;font-size:10px">${creditLimit!=null?'₹'+fmt.num(creditLimit):'—'}</td>
+      <td style="text-align:center;font-size:10px;font-weight:700;color:${overLimit?'#b91c1c':'#374151'}">${overLimit?'OVER LIMIT ⚠':creditLimit!=null?'OK':'—'}</td>
       <td style="text-align:right;font-size:10px;color:${overdue?'#b91c1c':'#374151'}">${daysOut!=null?daysOut+'d':''} ${overdue?'⚠':''}</td>
     </tr>`;
   }).join('');
@@ -8130,10 +8136,9 @@ async function renderLoanTransactionsReport(el){
   <!-- Date range controls -->
   <div class="flex flex-wrap items-end gap-3 mb-5 no-print">
     <div><label class="form-label text-xs">From</label>
-      <input type="date" id="lr-from" class="form-input text-sm w-32" value="${APP.tabs.loanRptFrom}" max="${today}"></div>
+      <input type="date" id="lr-from" class="form-input text-sm w-32" value="${APP.tabs.loanRptFrom}" max="${today}" onchange="loadLoanTransactionsReport()"></div>
     <div><label class="form-label text-xs">To</label>
-      <input type="date" id="lr-to" class="form-input text-sm w-32" value="${APP.tabs.loanRptTo}" max="${today}"></div>
-    <button onclick="loadLoanTransactionsReport()" class="btn btn-primary btn-sm">Apply</button>
+      <input type="date" id="lr-to" class="form-input text-sm w-32" value="${APP.tabs.loanRptTo}" max="${today}" onchange="loadLoanTransactionsReport()"></div>
     <div class="relative ml-auto no-print" id="loan-dl-wrap">
       <button onclick="toggleLoanDl()" class="btn btn-ghost flex items-center gap-2">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
@@ -8424,13 +8429,12 @@ async function renderCreditTransactionsTab(el){
 
   el.innerHTML=`<div class="flex flex-wrap items-end gap-3 mb-5 no-print">
     <div><label class="form-label text-xs">Customer</label>
-      <select id="cr-cust" class="form-input text-sm w-44">
+      <select id="cr-cust" class="form-input text-sm w-44" onchange="applyCreditsFilter()">
         <option value="all">All Customers</option>
         ${customers.map(c=>`<option value="${c.id}">${c.name}</option>`).join('')}
       </select></div>
-    <div><label class="form-label text-xs">From</label><input type="date" id="cr-from" class="form-input text-sm w-32" value="${APP.tabs.crFrom}" max="${today}"></div>
-    <div><label class="form-label text-xs">To</label><input type="date" id="cr-to" class="form-input text-sm w-32" value="${APP.tabs.crTo}" max="${today}"></div>
-    <button onclick="applyCreditsFilter()" class="btn btn-primary btn-sm">Apply</button>
+    <div><label class="form-label text-xs">From</label><input type="date" id="cr-from" class="form-input text-sm w-32" value="${APP.tabs.crFrom}" max="${today}" onchange="applyCreditsFilter()"></div>
+    <div><label class="form-label text-xs">To</label><input type="date" id="cr-to" class="form-input text-sm w-32" value="${APP.tabs.crTo}" max="${today}" onchange="applyCreditsFilter()"></div>
     <div class="flex gap-1 ml-2">
       <button id="cr-ledger-btn" onclick="setCrView('ledger')" class="btn btn-sm ${APP.tabs.crView==='ledger'?'btn-primary':'btn-ghost'}">Ledger View</button>
       <button id="cr-summary-btn" onclick="setCrView('summary')" class="btn btn-sm ${APP.tabs.crView==='summary'?'btn-primary':'btn-ghost'}">Customer Summary</button>
@@ -8694,7 +8698,6 @@ async function renderProfitTab(el){
   <div class="flex items-center gap-3 mb-5 flex-wrap no-print">
     <input type="month" id="profit-month" class="form-input w-40 text-sm" value="${APP.tabs.profitMonth}"
       onchange="APP.tabs.profitMonth=this.value;loadProfitReport()">
-    <button onclick="loadProfitReport()" class="btn btn-sm btn-primary">Apply</button>
   </div>
   <div id="profit-content">
     <div class="flex items-center justify-center h-24">
@@ -11690,9 +11693,8 @@ async function renderShopGSTReport(el){
   const today=fmt.today();
   const defFrom=today.slice(0,8)+'01';
   el.innerHTML=`<div class="flex items-end gap-3 mb-5 flex-wrap no-print">
-    <div><label class="form-label">From</label><input type="date" id="sgst-from" class="form-input" value="${defFrom}"></div>
-    <div><label class="form-label">To</label><input type="date" id="sgst-to" class="form-input" value="${today}"></div>
-    <button class="btn btn-primary btn-sm" onclick="loadShopGSTReport()">Load</button>
+    <div><label class="form-label">From</label><input type="date" id="sgst-from" class="form-input" value="${defFrom}" onchange="loadShopGSTReport()"></div>
+    <div><label class="form-label">To</label><input type="date" id="sgst-to" class="form-input" value="${today}" onchange="loadShopGSTReport()"></div>
     <button class="btn btn-ghost btn-sm" onclick="window.print()">🖨 Print / PDF</button>
   </div>
   <div id="shop-gst-content"></div>`;
@@ -11742,9 +11744,8 @@ async function renderShopPnLReport(el){
   const today=fmt.today();
   const defFrom=today.slice(0,8)+'01';
   el.innerHTML=`<div class="flex items-end gap-3 mb-5 flex-wrap no-print">
-    <div><label class="form-label">From</label><input type="date" id="spnl-from" class="form-input" value="${defFrom}"></div>
-    <div><label class="form-label">To</label><input type="date" id="spnl-to" class="form-input" value="${today}"></div>
-    <button class="btn btn-primary btn-sm" onclick="loadShopPnLReport()">Load</button>
+    <div><label class="form-label">From</label><input type="date" id="spnl-from" class="form-input" value="${defFrom}" onchange="loadShopPnLReport()"></div>
+    <div><label class="form-label">To</label><input type="date" id="spnl-to" class="form-input" value="${today}" onchange="loadShopPnLReport()"></div>
     <button class="btn btn-ghost btn-sm" onclick="window.print()">🖨 Print / PDF</button>
   </div>
   <div id="shop-pnl-content"></div>`;
@@ -11785,8 +11786,7 @@ async function loadShopPnLReport(){
 
 async function renderShopDaybookReport(el){
   el.innerHTML=`<div class="flex items-end gap-3 mb-5 flex-wrap no-print">
-    <div><label class="form-label">Date</label><input type="date" id="sdb-date" class="form-input" value="${fmt.today()}"></div>
-    <button class="btn btn-primary btn-sm" onclick="loadShopDaybookReport()">Load</button>
+    <div><label class="form-label">Date</label><input type="date" id="sdb-date" class="form-input" value="${fmt.today()}" onchange="loadShopDaybookReport()"></div>
     <button class="btn btn-ghost btn-sm" onclick="window.print()">🖨 Print / PDF</button>
   </div>
   <div id="shop-daybook-content"></div>`;
