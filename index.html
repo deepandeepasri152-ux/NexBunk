@@ -3497,17 +3497,23 @@ async function loadSpTable(from,to,products){
   el.innerHTML=`<div class="flex items-center justify-center h-32"><div class="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div></div>`;
   const today=fmt.today();
   const extFrom=(()=>{const d=new Date(from);d.setMonth(d.getMonth()-3);return d.toISOString().split('T')[0];})();
-  const cache={purchases:{},dips:{},sales:{},openings:{}};
+  const cache={purchases:{},dips:{},dipMeta:{},sales:{},tests:{},openings:{}};
   for(const p of products){const o=DB.get(`pbms_opening_stock_${p.id}`);if(o)cache.openings[p.id]=o;}
   const purKeys=DB.listActive('pbms_purchase_');
   for(const p of purKeys){if(!p||p.date<extFrom||p.date>to)continue;
     const key=`${p.date}_${p.product}`;cache.purchases[key]=(cache.purchases[key]||0)+(p.quantity||0);}
   const dipKeys=DB.listKeys('pbms_dip_');
   for(const k of dipKeys){const d=DB.get(k);if(!d||!d.date||d.date>to)continue;
-    for(const e of(d.entries||[])){if(e.physicalStock!=null)cache.dips[`${d.date}_${e.product}`]=e.physicalStock;}}
+    for(const e of(d.entries||[])){
+      if(e.physicalStock!=null)cache.dips[`${d.date}_${e.product}`]=e.physicalStock;
+      cache.dipMeta[`${d.date}_${e.product}`]={dipCm:e.dipCm??null,waterDip:e.waterDip??null,remarks:e.remarks||''};
+    }}
   const sessKeys=DB.listKeys('pbms_session_');
   for(const k of sessKeys){const s=DB.get(k);if(!s||s.status!=='Settled'||s.checkInDate<from||s.checkInDate>to)continue;
-    for(const n of(s.assignedNozzles||[])){const key=`${s.checkInDate}_${n.product}`;cache.sales[key]=(cache.sales[key]||0)+(n.netSale||0);}}
+    for(const n of(s.assignedNozzles||[])){const key=`${s.checkInDate}_${n.product}`;
+      cache.sales[key]=(cache.sales[key]||0)+(n.netSale||0);
+      cache.tests[key]=(cache.tests[key]||0)+(n.testLitres||0);
+    }}
   _spCache={from,to,products,today,...cache};
   const rows=computeAllSpRows(from,to,products,cache);_spCache.rows=rows;
   // Default to first product selected
@@ -3554,7 +3560,7 @@ function _applySpProduct(prodId){
 
 
 function computeAllSpRows(from,to,products,cache){
-  const rows=[];const prevClosing={};
+  const rows=[];const prevClosing={};const cumSale={};const cumVar={};
   for(const p of products){
     const os=cache.openings[p.id];prevClosing[p.id]=os?os.openingStock:0;
     let best='',bestVal=null;
@@ -3563,17 +3569,34 @@ function computeAllSpRows(from,to,products,cache){
       if(dprod===p.id&&ddate<from&&ddate>best){best=ddate;bestVal=val;}
     }
     if(bestVal!==null)prevClosing[p.id]=bestVal;
+    cumSale[p.id]=0;cumVar[p.id]=0;
   }
   let cur=from;
   while(cur<=to){
     const row={date:cur,products:{}};const prev=getPrevDate(cur);
     for(const p of products){
       const pid=p.id;
-      const load=cache.purchases[`${cur}_${pid}`]||0;const sale=cache.sales[`${cur}_${pid}`]||0;
-      const dip=cache.dips[`${cur}_${pid}`]??null;const prevDip=cache.dips[`${prev}_${pid}`]??null;
-      const opening=(prevDip!==null?prevDip:prevClosing[pid])+load;
-      const closing=opening-sale;const variable=dip!==null?dip-closing:null;
-      row.products[pid]={load,sale,opening,closing,dip,variable};prevClosing[pid]=closing;
+      const receipt=cache.purchases[`${cur}_${pid}`]||0; // B
+      const netSales=cache.sales[`${cur}_${pid}`]||0; // F = D-E
+      const pumpTest=(cache.tests||{})[`${cur}_${pid}`]||0; // E
+      const salesByMeter=netSales+pumpTest; // D
+      const dip=cache.dips[`${cur}_${pid}`]??null; // H (dip stock, litres)
+      const prevDip=cache.dips[`${prev}_${pid}`]??null;
+      const openingStock=prevDip!==null?prevDip:prevClosing[pid]; // A
+      const totalStock=openingStock+receipt; // C = A+B
+      const closingStock=totalStock-netSales; // G = C-F
+      const variation=dip!==null?dip-closingStock:null; // H-G
+      const meta=(cache.dipMeta||{})[`${cur}_${pid}`]||{};
+      cumSale[pid]+=netSales;
+      if(variation!==null)cumVar[pid]+=variation;
+      row.products[pid]={
+        receipt,openingStock,totalStock,salesByMeter,pumpTest,netSales,
+        closingStock,dip,variation,cumSale:cumSale[pid],cumVariation:cumVar[pid],
+        dipCm:meta.dipCm??null,waterDip:meta.waterDip??null,remarks:meta.remarks||'',
+        // legacy aliases used elsewhere in the app
+        load:receipt,sale:netSales,opening:openingStock,closing:closingStock,variable:variation
+      };
+      prevClosing[pid]=closingStock;
     }
     rows.push(row);const d=new Date(cur);d.setDate(d.getDate()+1);cur=d.toISOString().split('T')[0];
   }
@@ -3592,40 +3615,57 @@ function fmtShortDate(s){
 // TABLE RENDERING — themed, light header
 // ====================================================
 function renderSpTableHTML(rows,products,today){
-  const inpCls='w-24 text-right font-mono text-xs border border-slate-300 rounded px-1.5 py-1 bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-200 outline-none transition-colors stock-input';
+  const inpCls='w-16 text-right font-mono text-xs border border-slate-300 rounded px-1.5 py-1 bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-200 outline-none transition-colors stock-input';
+  const sub=(t)=>`<div class="normal-case font-normal text-[9px] text-slate-400 leading-none mt-0.5">${t}</div>`;
 
-  // One table per product
+  // One table per product — column layout mirrors the daily stock-position register (OMC format)
   return products.map(p=>{
     const bodyRows=rows.map(row=>{
       const isToday=row.date===today;
       const isFuture=row.date>today;
-      const d=row.products[p.id]||{load:0,sale:0,opening:0,closing:0,dip:null,variable:null};
-      const varCls=d.variable===null?'text-slate-300':d.variable<0?'text-red-600 font-semibold':d.variable>0?'text-green-700 font-semibold':'text-slate-500';
-      const varDisp=d.variable===null?'—':(d.variable>0?'+':'')+fmt.num(d.variable);
+      const d=row.products[p.id]||{receipt:0,netSales:0,pumpTest:0,salesByMeter:0,openingStock:0,totalStock:0,closingStock:0,dip:null,variation:null,cumSale:0,cumVariation:0,dipCm:null,waterDip:null,remarks:''};
+      const varCls=d.variation===null?'text-slate-300':d.variation<0?'text-red-600 font-semibold':d.variation>0?'text-green-700 font-semibold':'text-slate-500';
+      const varDisp=d.variation===null?'—':(d.variation>0?'+':'')+fmt.num(d.variation);
+      const cumVarCls=d.cumVariation<0?'text-red-600':d.cumVariation>0?'text-green-700':'text-slate-500';
+      const cumVarDisp=(d.cumVariation>0?'+':'')+fmt.num(d.cumVariation||0);
       const dipHasValue=d.dip!==null;
       const dipTxtCls=dipHasValue?'text-orange-600 font-semibold':'text-slate-400';
-      const loadLink=d.load>0?` <button onclick="event.stopPropagation();switchSpTab('purchases')" class="text-blue-400 hover:text-blue-600 text-xs no-print" title="View/edit in Purchases">↗</button>`:'';
-      const dipTd=isFuture
+      const loadLink=d.receipt>0?` <button onclick="event.stopPropagation();switchSpTab('purchases')" class="text-blue-400 hover:text-blue-600 text-xs no-print" title="View/edit in Purchases">↗</button>`:'';
+      const remarksEsc=(d.remarks||'').replace(/"/g,'&quot;');
+      const dipStockTd=isFuture
         ?`<td class="px-3 py-2 text-right font-mono text-xs ${dipHasValue?'text-orange-500':'text-slate-400'}">${dipHasValue?fmt.num(d.dip):'—'}</td>`
-        :`<td class="px-2 py-1.5"><input type="number" step="0.01" min="0" class="sp-dip-inp ${inpCls} ${dipTxtCls}" data-date="${row.date}" data-product="${p.id}" value="${d.dip!==null?d.dip:''}" placeholder="0.00" onchange="spOnDipChange(this)" style="min-width:70px;max-width:90px"></td>`;
+        :`<td class="px-2 py-1.5"><div class="flex items-center justify-end gap-1">
+            <input type="number" step="0.01" min="0" class="sp-dip-inp ${inpCls} ${dipTxtCls}" data-date="${row.date}" data-product="${p.id}" value="${d.dip!==null?d.dip:''}" placeholder="0.00" onchange="spOnDipChange(this)">
+            <button onclick="event.stopPropagation();showDipDetail(this,'${row.date}','${p.id}')" class="text-slate-400 hover:text-slate-700 no-print" title="Dip details — cm, water dip, remarks">📏</button>
+          </div></td>`;
       return`<tr class="${isFuture?'opacity-40':'hover:bg-slate-50'} border-t border-slate-100 transition-colors" data-date="${row.date}">
         <td class="px-3 py-2 text-sm font-medium whitespace-nowrap border-r border-slate-200 ${isToday?'bg-blue-50':'bg-white'}">
           ${fmtShortDate(row.date)}${isToday?'<span class="badge badge-blue ml-1 text-xs">Today</span>':''}
         </td>
-        <td class="px-3 py-2 text-right font-mono text-sm text-slate-700">${d.load>0?fmt.num(d.load):'—'}${loadLink}</td>
-        <td id="sp-${row.date}-${p.id}-opening" class="px-3 py-2 text-right font-mono text-sm text-slate-800">${fmt.num(d.opening)}</td>
-        <td id="sp-${row.date}-${p.id}-sale" class="px-3 py-2 text-right font-mono text-sm text-blue-700 bg-blue-50">${fmt.num(d.sale)}</td>
-        <td id="sp-${row.date}-${p.id}-closing" class="px-3 py-2 text-right font-mono text-sm text-slate-800">${fmt.num(d.closing)}</td>
-        ${dipTd}
+        <td id="sp-${row.date}-${p.id}-opening" class="px-3 py-2 text-right font-mono text-sm text-slate-800">${fmt.num(d.openingStock)}</td>
+        <td class="px-3 py-2 text-right font-mono text-sm text-slate-700">${d.receipt>0?fmt.num(d.receipt):'—'}${loadLink}</td>
+        <td id="sp-${row.date}-${p.id}-total" class="px-3 py-2 text-right font-mono text-sm text-slate-700">${fmt.num(d.totalStock)}</td>
+        <td class="px-3 py-2 text-right font-mono text-xs text-slate-600">${fmt.num(d.salesByMeter)}</td>
+        <td class="px-3 py-2 text-right font-mono text-xs ${d.pumpTest>0?'text-amber-600 font-semibold':'text-slate-300'}">${d.pumpTest>0?fmt.num(d.pumpTest):'—'}</td>
+        <td id="sp-${row.date}-${p.id}-sale" class="px-3 py-2 text-right font-mono text-sm text-blue-700 bg-blue-50">${fmt.num(d.netSales)}</td>
+        <td id="sp-${row.date}-${p.id}-cumsale" class="px-3 py-2 text-right font-mono text-xs text-slate-500">${fmt.num(d.cumSale)}</td>
+        <td id="sp-${row.date}-${p.id}-closing" class="px-3 py-2 text-right font-mono text-sm text-slate-800">${fmt.num(d.closingStock)}</td>
+        <td id="sp-${row.date}-${p.id}-dipcm" class="px-3 py-2 text-right font-mono text-xs text-slate-500">${d.dipCm!=null?fmt.num(d.dipCm):'—'}</td>
+        ${dipStockTd}
         <td id="sp-${row.date}-${p.id}-variable" class="px-3 py-2 text-right font-mono text-sm ${varCls}">${varDisp}</td>
+        <td id="sp-${row.date}-${p.id}-cumvar" class="px-3 py-2 text-right font-mono text-xs ${cumVarCls}">${cumVarDisp}</td>
+        <td id="sp-${row.date}-${p.id}-waterdip" class="px-3 py-2 text-right font-mono text-xs ${d.waterDip?'text-amber-600 font-semibold':'text-slate-400'}">${d.waterDip!=null?fmt.num(d.waterDip):'—'}</td>
+        <td id="sp-${row.date}-${p.id}-remarks" class="px-3 py-2 text-xs text-slate-500 max-w-[140px] truncate" title="${remarksEsc}">${d.remarks||'—'}</td>
       </tr>`;
     }).join('');
 
-    // Footer totals
-    const totalLoad=rows.reduce((s,r)=>s+(r.products[p.id]?.load||0),0);
-    const totalSale=rows.reduce((s,r)=>s+(r.products[p.id]?.sale||0),0);
-    const totalVar=rows.reduce((s,r)=>{const v=r.products[p.id]?.variable;return v!==null?s+v:s;},0);
-    const varCls=totalVar<0?'text-red-600':totalVar>0?'text-green-700':'';
+    // Footer totals — receipts/meter-sales/pump-test/net-sales/variation summed; cumulative columns are running totals (see last row)
+    const totalReceipt=rows.reduce((s,r)=>s+(r.products[p.id]?.receipt||0),0);
+    const totalMeter=rows.reduce((s,r)=>s+(r.products[p.id]?.salesByMeter||0),0);
+    const totalTest=rows.reduce((s,r)=>s+(r.products[p.id]?.pumpTest||0),0);
+    const totalNet=rows.reduce((s,r)=>s+(r.products[p.id]?.netSales||0),0);
+    const totalVar=rows.reduce((s,r)=>{const v=r.products[p.id]?.variation;return v!=null?s+v:s;},0);
+    const varFootCls=totalVar<0?'text-red-600':totalVar>0?'text-green-700':'';
 
     return`<div class="mb-6" data-sp-table="${p.id}">
       <div class="flex items-center gap-2 px-3 py-2 bg-slate-800 rounded-t-lg">
@@ -3633,28 +3673,44 @@ function renderSpTableHTML(rows,products,today){
         <span class="text-slate-400 text-xs font-mono">${p.id}</span>
       </div>
       <div class="overflow-x-auto border border-slate-200 rounded-b-lg">
-      <table class="w-full border-collapse" style="font-size:13px">
+      <table class="w-full border-collapse" style="font-size:12.5px">
         <thead>
           <tr class="text-xs font-semibold text-slate-600 bg-slate-100 uppercase tracking-wider">
             <th class="px-3 py-2 text-left border-r border-slate-200">Date</th>
-            <th class="px-3 py-2 text-right">Load (L)</th>
-            <th class="px-3 py-2 text-right">Opening (L)</th>
-            <th class="px-3 py-2 text-right">Sale (L)</th>
-            <th class="px-3 py-2 text-right">Closing (L)</th>
-            <th class="px-3 py-2 text-right">Dip (L)</th>
-            <th class="px-3 py-2 text-right">Variable (L)</th>
+            <th class="px-3 py-2 text-right">Opening Stock${sub('(A)')}</th>
+            <th class="px-3 py-2 text-right">Receipt${sub('(B)')}</th>
+            <th class="px-3 py-2 text-right">Total Stock${sub('(C=A+B)')}</th>
+            <th class="px-3 py-2 text-right">Sales by Meter${sub('(D)')}</th>
+            <th class="px-3 py-2 text-right">Pump Test${sub('(E)')}</th>
+            <th class="px-3 py-2 text-right">Net Sales${sub('(F=D−E)')}</th>
+            <th class="px-3 py-2 text-right">Cum. Sales</th>
+            <th class="px-3 py-2 text-right">Closing Stock${sub('(G=C−F)')}</th>
+            <th class="px-3 py-2 text-right">Dip${sub('(cm)')}</th>
+            <th class="px-3 py-2 text-right">Dip Stock${sub('(H)')}</th>
+            <th class="px-3 py-2 text-right">Variation${sub('(H−G)')}</th>
+            <th class="px-3 py-2 text-right">Cum. Variation</th>
+            <th class="px-3 py-2 text-right">Water Dip${sub('(cm)')}</th>
+            <th class="px-3 py-2 text-left">Remarks</th>
           </tr>
         </thead>
         <tbody>${bodyRows}</tbody>
         <tfoot>
           <tr class="bg-slate-100 border-t-2 border-slate-300 font-bold text-sm">
             <td class="px-3 py-2 border-r border-slate-200">TOTAL</td>
-            <td class="px-3 py-2 text-right font-mono">${totalLoad>0?fmt.num(totalLoad):'—'}</td>
             <td class="px-3 py-2 text-center text-slate-400">—</td>
-            <td class="px-3 py-2 text-right font-mono text-blue-700">${fmt.num(totalSale)}</td>
+            <td id="sp-foot-${p.id}-receipt" class="px-3 py-2 text-right font-mono">${totalReceipt>0?fmt.num(totalReceipt):'—'}</td>
+            <td class="px-3 py-2 text-center text-slate-400">—</td>
+            <td id="sp-foot-${p.id}-meter" class="px-3 py-2 text-right font-mono">${fmt.num(totalMeter)}</td>
+            <td id="sp-foot-${p.id}-test" class="px-3 py-2 text-right font-mono">${totalTest>0?fmt.num(totalTest):'—'}</td>
+            <td id="sp-foot-${p.id}-net" class="px-3 py-2 text-right font-mono text-blue-700">${fmt.num(totalNet)}</td>
             <td class="px-3 py-2 text-center text-slate-400">—</td>
             <td class="px-3 py-2 text-center text-slate-400">—</td>
-            <td class="px-3 py-2 text-right font-mono ${varCls}">${(totalVar>0?'+':'')+fmt.num(totalVar)}</td>
+            <td class="px-3 py-2 text-center text-slate-400">—</td>
+            <td class="px-3 py-2 text-center text-slate-400">—</td>
+            <td id="sp-foot-${p.id}-var" class="px-3 py-2 text-right font-mono ${varFootCls}">${(totalVar>0?'+':'')+fmt.num(totalVar)}</td>
+            <td class="px-3 py-2 text-center text-slate-400">—</td>
+            <td class="px-3 py-2 text-center text-slate-400">—</td>
+            <td class="px-3 py-2 text-center text-slate-400">—</td>
           </tr>
         </tfoot>
       </table>
@@ -3674,13 +3730,21 @@ async function downloadStockLedgerExcel(){
   const out=rows.map(row=>{
     const r={'Date':fmt.date(row.date)};
     for(const p of products){
-      const d=row.products[p.id]||{load:0,sale:0,opening:0,closing:0,dip:null,variable:null};
-      r[`${p.id} Load (L)`]=d.load||0;
-      r[`${p.id} Opening (L)`]=d.opening||0;
-      r[`${p.id} Closing (L)`]=d.closing||0;
-      r[`${p.id} Dip (L)`]=d.dip!=null?d.dip:'';
-      r[`${p.id} Variable (L)`]=d.variable!=null?d.variable:'';
-      r[`${p.id} Sale (L)`]=d.sale||0;
+      const d=row.products[p.id]||{};
+      r[`${p.id} Opening Stock (A)`]=d.openingStock||0;
+      r[`${p.id} Receipt (B)`]=d.receipt||0;
+      r[`${p.id} Total Stock (C=A+B)`]=d.totalStock||0;
+      r[`${p.id} Sales by Meter (D)`]=d.salesByMeter||0;
+      r[`${p.id} Pump Test (E)`]=d.pumpTest||0;
+      r[`${p.id} Net Sales (F=D-E)`]=d.netSales||0;
+      r[`${p.id} Cum. Sales`]=d.cumSale||0;
+      r[`${p.id} Closing Stock (G=C-F)`]=d.closingStock||0;
+      r[`${p.id} Dip (cm)`]=d.dipCm!=null?d.dipCm:'';
+      r[`${p.id} Dip Stock (H)`]=d.dip!=null?d.dip:'';
+      r[`${p.id} Variation (H-G)`]=d.variation!=null?d.variation:'';
+      r[`${p.id} Cum. Variation`]=d.cumVariation||0;
+      r[`${p.id} Water Dip (cm)`]=d.waterDip!=null?d.waterDip:'';
+      r[`${p.id} Remarks`]=d.remarks||'';
     }
     return r;
   });
@@ -3720,6 +3784,8 @@ function showDipDetail(btn,date,product){
         <input type="number" id="dp-density" step="0.0001" min="0.7" max="1.0" value="${entry.density||''}" placeholder="0.8270" class="form-input" style="font-size:12px;padding:4px 8px;text-align:right;font-family:monospace"></div>
       <div><label style="font-size:10px;color:#64748b;display:block">Temperature (°C)</label>
         <input type="number" id="dp-temp" step="0.5" value="${entry.temperature||''}" placeholder="30.0" class="form-input" style="font-size:12px;padding:4px 8px;text-align:right;font-family:monospace"></div>
+      <div><label style="font-size:10px;color:#64748b;display:block">Remarks</label>
+        <input type="text" id="dp-remarks" value="${(entry.remarks||'').replace(/"/g,'&quot;')}" placeholder="Optional note" class="form-input" style="font-size:12px;padding:4px 8px"></div>
     </div>
     <div style="display:flex;gap:6px;margin-top:8px">
       <button onclick="saveDipDetail('${date}','${product}')" style="flex:1;background:#1e3a5f;color:#fff;border:none;border-radius:6px;padding:5px 8px;cursor:pointer;font-size:11px;font-weight:600">Save</button>
@@ -3741,10 +3807,22 @@ async function saveDipDetail(date,product){
   const waterDip=parseFloat(document.getElementById('dp-water')?.value)||null;
   const density=parseFloat(document.getElementById('dp-density')?.value)||null;
   const temperature=parseFloat(document.getElementById('dp-temp')?.value)||null;
-  await spSaveDip(product,date,litres,{dipCm:dipCm||null,waterDip:waterDip||null,density:density||null,temperature:temperature||null});
+  const remarks=document.getElementById('dp-remarks')?.value?.trim()||'';
+  await spSaveDip(product,date,litres,{dipCm:dipCm||null,waterDip:waterDip||null,density:density||null,temperature:temperature||null,remarks});
   // Update cache and recalc
-  if(_spCache){if(litres>0)_spCache.dips[`${date}_${product}`]=litres;else delete _spCache.dips[`${date}_${product}`];}
+  if(_spCache){
+    if(litres>0)_spCache.dips[`${date}_${product}`]=litres;else delete _spCache.dips[`${date}_${product}`];
+    if(!_spCache.dipMeta)_spCache.dipMeta={};
+    _spCache.dipMeta[`${date}_${product}`]={dipCm:dipCm||null,waterDip:waterDip||null,remarks};
+  }
   spRecalcFromDate(date);
+  // Update the dip(cm) / water-dip / remarks cells for this row
+  const setTxt=(id,txt)=>{const e=document.getElementById(id);if(e)e.textContent=txt;};
+  setTxt(`sp-${date}-${product}-dipcm`,dipCm!=null?fmt.num(dipCm):'—');
+  const wdEl=document.getElementById(`sp-${date}-${product}-waterdip`);
+  if(wdEl){wdEl.textContent=waterDip!=null?fmt.num(waterDip):'—';wdEl.className=`px-3 py-2 text-right font-mono text-xs ${waterDip?'text-amber-600 font-semibold':'text-slate-400'}`;}
+  const rmEl=document.getElementById(`sp-${date}-${product}-remarks`);
+  if(rmEl){rmEl.textContent=remarks||'—';rmEl.title=remarks;}
   // Update the dip input display value
   const inp=document.querySelector(`.sp-dip-inp[data-date="${date}"][data-product="${product}"]`);
   if(inp){inp.value=litres>0?litres:'';}
@@ -3772,32 +3850,41 @@ function spRecalcFromDate(startDate){
     if(row.date<startDate)continue;
     for(const p of products){
       const d=row.products[p.id];if(!d)continue;
-      const varCls=d.variable===null?'text-slate-300 px-3 py-2 text-right font-mono text-sm':d.variable<0?'text-red-600 bg-red-50 font-semibold px-3 py-2 text-right font-mono text-sm':d.variable>0?'text-green-700 bg-green-50 font-semibold px-3 py-2 text-right font-mono text-sm':'text-slate-600 px-3 py-2 text-right font-mono text-sm';
-      const varDisp=d.variable===null?'—':(d.variable>0?'+':'')+fmt.num(d.variable);
+      const varCls=d.variation===null?'text-slate-300 px-3 py-2 text-right font-mono text-sm':d.variation<0?'text-red-600 bg-red-50 font-semibold px-3 py-2 text-right font-mono text-sm':d.variation>0?'text-green-700 bg-green-50 font-semibold px-3 py-2 text-right font-mono text-sm':'text-slate-600 px-3 py-2 text-right font-mono text-sm';
+      const varDisp=d.variation===null?'—':(d.variation>0?'+':'')+fmt.num(d.variation);
+      const cumVarCls=`px-3 py-2 text-right font-mono text-xs ${d.cumVariation<0?'text-red-600':d.cumVariation>0?'text-green-700':'text-slate-500'}`;
+      const cumVarDisp=(d.cumVariation>0?'+':'')+fmt.num(d.cumVariation||0);
       const set=(id,txt)=>{const e=document.getElementById(id);if(e)e.textContent=txt;};
       const setCls=(id,cls,txt)=>{const e=document.getElementById(id);if(e){e.className=cls;e.textContent=txt;}};
       const prevDate=getPrevDate(row.date);
       const hasPrevDip=(_spCache?.dips[`${prevDate}_${p.id}`]??null)!==null;
-      const hint=hasPrevDip?`<div class="text-xs text-slate-400 font-normal leading-none mt-0.5">${d.load>0?'← dip+load':'← prev dip'}</div>`:'';
+      const hint=hasPrevDip?`<div class="text-xs text-slate-400 font-normal leading-none mt-0.5">← prev dip</div>`:'';
       const openEl=document.getElementById(`sp-${row.date}-${p.id}-opening`);
-      if(openEl)openEl.innerHTML=fmt.num(d.opening)+hint;
-      set(`sp-${row.date}-${p.id}-closing`,fmt.num(d.closing));
-      set(`sp-${row.date}-${p.id}-sale`,fmt.num(d.sale));
+      if(openEl)openEl.innerHTML=fmt.num(d.openingStock)+hint;
+      set(`sp-${row.date}-${p.id}-total`,fmt.num(d.totalStock));
+      set(`sp-${row.date}-${p.id}-closing`,fmt.num(d.closingStock));
+      set(`sp-${row.date}-${p.id}-sale`,fmt.num(d.netSales));
+      set(`sp-${row.date}-${p.id}-cumsale`,fmt.num(d.cumSale));
       setCls(`sp-${row.date}-${p.id}-variable`,varCls,varDisp);
+      setCls(`sp-${row.date}-${p.id}-cumvar`,cumVarCls,cumVarDisp);
     }
   }
   spUpdateFooter(allRows,(_spCache||{}).products||[]);
 }
 function spUpdateFooter(rows,products){
-  const tfoot=document.querySelector('#sp-tab-content tfoot tr');if(!tfoot)return;
-  const cells=tfoot.querySelectorAll('td');if(!cells.length)return;let ci=1;
   products.forEach(p=>{
-    const load=rows.reduce((s,r)=>s+(r.products[p.id]?.load||0),0);
-    const sale=rows.reduce((s,r)=>s+(r.products[p.id]?.sale||0),0);
-    const variable=rows.reduce((s,r)=>{const v=r.products[p.id]?.variable;return v!==null?s+v:s;},0);
-    if(cells[ci])cells[ci].textContent=load>0?fmt.num(load):'—';
-    if(cells[ci+4]){cells[ci+4].textContent=(variable>0?'+':'')+fmt.num(variable);cells[ci+4].className=`px-3 py-2 text-right font-mono font-bold ${variable<0?'text-red-600':variable>0?'text-green-700':''}`;};
-    if(cells[ci+5])cells[ci+5].textContent=fmt.num(sale);ci+=6;
+    const receipt=rows.reduce((s,r)=>s+(r.products[p.id]?.receipt||0),0);
+    const meter=rows.reduce((s,r)=>s+(r.products[p.id]?.salesByMeter||0),0);
+    const test=rows.reduce((s,r)=>s+(r.products[p.id]?.pumpTest||0),0);
+    const net=rows.reduce((s,r)=>s+(r.products[p.id]?.netSales||0),0);
+    const variation=rows.reduce((s,r)=>{const v=r.products[p.id]?.variation;return v!=null?s+v:s;},0);
+    const set=(id,txt)=>{const e=document.getElementById(id);if(e)e.textContent=txt;};
+    set(`sp-foot-${p.id}-receipt`,receipt>0?fmt.num(receipt):'—');
+    set(`sp-foot-${p.id}-meter`,fmt.num(meter));
+    set(`sp-foot-${p.id}-test`,test>0?fmt.num(test):'—');
+    set(`sp-foot-${p.id}-net`,fmt.num(net));
+    const varEl=document.getElementById(`sp-foot-${p.id}-var`);
+    if(varEl){varEl.textContent=(variation>0?'+':'')+fmt.num(variation);varEl.className=`px-3 py-2 text-right font-mono font-bold ${variation<0?'text-red-600':variation>0?'text-green-700':''}`;}
   });
 }
 
@@ -6812,9 +6899,14 @@ function computeDailyReportData(date){
   for(const cs of csKeys){if(cs.date===date){csTotal+=(cs.amount||0);csRows.push(cs);}}
 
   // ── 5. LOAN PAYMENTS ──
+  // loanRepayRows carries the lender name per repayment so the Daily Report
+  // can show WHO was repaid (not just a single blended total) — looked up
+  // from the parent loan record since individual repayments only store loanId.
   const payKeys=DB.listActive('pbms_loan_repayment_');
-  let loanRepayTotal=0;
-  for(const r of payKeys){if(r&&r.date===date)loanRepayTotal+=(r.amount||0);}
+  const loansForRepay={};for(const l of DB.listActive('pbms_loan_')){if(l)loansForRepay[l.id]=l;}
+  let loanRepayTotal=0;const loanRepayRows=[];
+  for(const r of payKeys){if(r&&r.date===date){loanRepayTotal+=(r.amount||0);
+    loanRepayRows.push({...r,lenderName:loansForRepay[r.loanId]?.lenderName||r.lenderName||'—'});}}
 
   // ── 6. CASH & BANKING ──
   const bankKeys=DB.listKeys('pbms_bank_tx_');
@@ -6827,15 +6919,23 @@ function computeDailyReportData(date){
   for(const k of depKeys){const d=DB.get(k);if(d&&d.date===date)bankDeposit+=(d.amount||0);}
 
   // ── 7. CREDIT PAYMENTS RECEIVED ──
-  let cpTotal=0;
-  for(const p of DB.listActive('pbms_payment_')){if(p.date===date)cpTotal+=(p.amount||0);}
+  // cpRows carries the customer name per payment (looked up from the
+  // customer record) so the Daily Report can list WHO paid, not just a
+  // single blended total.
+  const custForPay={};for(const c of DB.listActive('pbms_customer_')){if(c)custForPay[c.id]=c;}
+  let cpTotal=0;const cpRows=[];
+  for(const p of DB.listActive('pbms_payment_')){if(p.date===date){cpTotal+=(p.amount||0);
+    cpRows.push({...p,customerName:custForPay[p.customerId]?.name||p.customerName||'—'});}}
 
   // ── 8. TOTAL PRODUCT STOCK REMAINING (as of today, independent of report date) ──
   const stockLevels=getCurrentStockLevels(s.products||[]);
 
   // ── 9. TODAY'S TOTAL CASH IN / CASH OUT — all payment modes (cash + bank) ──
-  let loanReceivedAll=0;
-  for(const l of DB.listActive('pbms_loan_')){if(l&&l.startDate===date)loanReceivedAll+=(l.principalAmount||0);}
+  // loanReceivedRows carries the lender name for each new loan taken on
+  // this date, so the Daily Report can list WHO the loan came from.
+  let loanReceivedAll=0;const loanReceivedRows=[];
+  for(const l of DB.listActive('pbms_loan_')){if(l&&l.startDate===date){loanReceivedAll+=(l.principalAmount||0);
+    loanReceivedRows.push(l);}}
   let incentiveAll=0;
   for(const d of DB.listActive('pbms_incentive_due_')){if(d&&d.date===date)incentiveAll+=(d.amount||0);}
   let purchasePaidTotal=0;
@@ -6847,9 +6947,9 @@ function computeDailyReportData(date){
   return{date,daySessions,settledSessions,fuelHsd,fuelMs,fuelAmt,pendingSettleCount,pendingSettleAmt,
     fuelOilCash,fuelOilUpi,fuelOilCard,fuelOilCredit,fuelOil,fuelDiscount,fuelOilNet,totalSE,
     shopSalesToday,shopCash,shopUpi,shopCard,shopCredit,shopNet,
-    purTotal,purRows,expTotal,expRows,csTotal,csRows,loanRepayTotal,
-    bankDeposit,bankWithdraw,cpTotal,stockLevels,stockVarianceRows,stockVarianceFlagCount,stockTolerance,
-    loanReceivedAll,incentiveAll,purchasePaidTotal,salesNetCollected,todayCashInAll,todayCashOutAll};
+    purTotal,purRows,expTotal,expRows,csTotal,csRows,loanRepayTotal,loanRepayRows,
+    bankDeposit,bankWithdraw,cpTotal,cpRows,stockLevels,stockVarianceRows,stockVarianceFlagCount,stockTolerance,
+    loanReceivedAll,loanReceivedRows,incentiveAll,purchasePaidTotal,salesNetCollected,todayCashInAll,todayCashOutAll};
 }
 
 async function loadDailyReport(){
@@ -6864,9 +6964,9 @@ async function loadDailyReport(){
   const{daySessions,settledSessions,fuelHsd,fuelMs,fuelAmt,pendingSettleCount,pendingSettleAmt,
     fuelOilCash,fuelOilUpi,fuelOilCard,fuelOilCredit,fuelOil,fuelDiscount,fuelOilNet,totalSE,
     shopSalesToday,shopCash,shopUpi,shopCard,shopCredit,shopNet,
-    purTotal,purRows,expTotal,expRows,csTotal,csRows,loanRepayTotal,
-    bankDeposit,bankWithdraw,cpTotal,stockLevels,stockVarianceRows,stockVarianceFlagCount,
-    loanReceivedAll,incentiveAll,purchasePaidTotal,salesNetCollected,todayCashInAll,todayCashOutAll
+    purTotal,purRows,expTotal,expRows,csTotal,csRows,loanRepayTotal,loanRepayRows,
+    bankDeposit,bankWithdraw,cpTotal,cpRows,stockLevels,stockVarianceRows,stockVarianceFlagCount,
+    loanReceivedAll,loanReceivedRows,incentiveAll,purchasePaidTotal,salesNetCollected,todayCashInAll,todayCashOutAll
   }=computeDailyReportData(date);
 
   el.innerHTML=`
@@ -6991,16 +7091,23 @@ async function loadDailyReport(){
     <div class="px-4 py-2.5 bg-purple-50 border-b border-purple-100 flex items-center gap-2">
       <span class="text-sm font-bold text-purple-800">💳 Credit & Loan</span>
     </div>
-    <div class="grid grid-cols-2 divide-x divide-slate-100">
+    <div class="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-slate-100">
       <div class="p-3">
         <div class="text-xs text-slate-500 mb-2 font-semibold">Credit Sales</div>
         ${csRows.length===0?`<div class="text-xs text-slate-400">None</div>`:`<div class="space-y-1">${csRows.map(cs=>`<div class="flex justify-between text-xs"><span class="text-slate-600">${cs.customerName||'—'}</span><span class="font-mono text-amber-700">${fmt.currency(cs.amount||0)}</span></div>`).join('')}<div class="border-t mt-1 pt-1 flex justify-between text-xs font-bold"><span>Total</span><span class="text-amber-700">${fmt.currency(csTotal)}</span></div></div>`}
       </div>
       <div class="p-3">
-        <div class="text-xs text-slate-500 mb-2 font-semibold">Credit Received · Loan Repaid</div>
-        ${cpTotal>0?`<div class="flex justify-between text-xs mb-1"><span class="text-slate-600">Credit payments received</span><span class="font-mono text-green-700">${fmt.currency(cpTotal)}</span></div>`:''}
-        ${loanRepayTotal>0?`<div class="flex justify-between text-xs"><span class="text-slate-600">Loan repayments made</span><span class="font-mono text-red-600">${fmt.currency(loanRepayTotal)}</span></div>`:''}
-        ${cpTotal===0&&loanRepayTotal===0?`<div class="text-xs text-slate-400">None</div>`:''}
+        <div class="text-xs text-slate-500 mb-2 font-semibold">Credit Received</div>
+        ${cpRows.length===0?`<div class="text-xs text-slate-400">None</div>`:`<div class="space-y-1">${cpRows.map(cp=>`<div class="flex justify-between text-xs"><span class="text-slate-600">${cp.customerName||'—'}</span><span class="font-mono text-green-700">${fmt.currency(cp.amount||0)}</span></div>`).join('')}<div class="border-t mt-1 pt-1 flex justify-between text-xs font-bold"><span>Total</span><span class="text-green-700">${fmt.currency(cpTotal)}</span></div></div>`}
+      </div>
+      <div class="p-3">
+        <div class="text-xs text-slate-500 mb-2 font-semibold">Loan Received / Repaid</div>
+        ${(loanReceivedRows.length===0&&loanRepayRows.length===0)?`<div class="text-xs text-slate-400">None</div>`:`<div class="space-y-1">
+          ${loanReceivedRows.map(l=>`<div class="flex justify-between text-xs"><span class="text-slate-600">${l.lenderName||'—'} <span class="text-slate-400">(taken)</span></span><span class="font-mono text-red-600">${fmt.currency(l.principalAmount||0)}</span></div>`).join('')}
+          ${loanRepayRows.map(r=>`<div class="flex justify-between text-xs"><span class="text-slate-600">${r.lenderName||'—'} <span class="text-slate-400">(repaid)</span></span><span class="font-mono text-green-700">${fmt.currency(r.amount||0)}</span></div>`).join('')}
+          <div class="border-t mt-1 pt-1 flex justify-between text-xs font-bold"><span>Received</span><span class="text-red-600">${fmt.currency(loanReceivedAll)}</span></div>
+          <div class="flex justify-between text-xs font-bold"><span>Repaid</span><span class="text-green-700">${fmt.currency(loanRepayTotal)}</span></div>
+        </div>`}
       </div>
     </div>
   </div>
@@ -7350,9 +7457,10 @@ async function generateDailySalesStatement(){
   // Group nozzles by product using paise
   const productMap={};
   settled.forEach(s=>(s.assignedNozzles||[]).forEach(n=>{
-    if(!productMap[n.product])productMap[n.product]={nozzles:[],totalLitres100:0,totalAmtPaise:0};
+    if(!productMap[n.product])productMap[n.product]={nozzles:[],totalLitres100:0,totalTestLitres100:0,totalAmtPaise:0};
     productMap[n.product].nozzles.push({...n,employeeName:staffMap[s.employeeId]||s.employeeId||'-',checkInTime:s.checkInTime||'',checkOutTime:s.checkOutTime||''});
     productMap[n.product].totalLitres100+=(n.netSalePaise!=null?n.netSalePaise:Math.round((n.netSale||0)*100));
+    productMap[n.product].totalTestLitres100+=Math.round((n.testLitres||0)*100);
     productMap[n.product].totalAmtPaise+=(n.amountPaise!=null?n.amountPaise:Money.toPaise(n.amount||0));
   }));
 
@@ -7362,10 +7470,14 @@ async function generateDailySalesStatement(){
     const receiptsToday=receipts.filter(r=>r.product===prod);
     const receivedQty=receiptsToday.reduce((a,r)=>a+(r.quantity||0),0);
     const lorryNos=receiptsToday.map(r=>r.lorryNo||r.invoiceNo||'—').join(', ')||'Nil';
-    const openStock=(dipPrev?.entries||[]).find(e=>e.product===prod)?.physicalStock;
-    const closeStock=(dipToday?.entries||[]).find(e=>e.product===prod)?.physicalStock;
-    const meterSales=productMap[prod].totalLitres100/100;
-    const bookClose=openStock!=null?openStock+receivedQty-meterSales:null;
+    const openEntry=(dipPrev?.entries||[]).find(e=>e.product===prod);
+    const closeEntry=(dipToday?.entries||[]).find(e=>e.product===prod);
+    const openStock=openEntry?.physicalStock;
+    const closeStock=closeEntry?.physicalStock;
+    const pumpTest=productMap[prod].totalTestLitres100/100;
+    const netSales=productMap[prod].totalLitres100/100;
+    const salesByMeter=netSales+pumpTest;
+    const bookClose=openStock!=null?openStock+receivedQty-netSales:null;
     const variation=bookClose!=null&&closeStock!=null?closeStock-bookClose:null;
     const variationPct=bookClose!=null&&bookClose>0&&variation!=null?(variation/bookClose*100):null;
     const variationFlag=variationPct!=null&&Math.abs(variationPct)>0.5;
@@ -7374,8 +7486,13 @@ async function generateDailySalesStatement(){
       <td style="text-align:right">₹${fmt.num(meta.rate||0)}/L</td>
       <td style="text-align:right">${openStock!=null?fmt.num(openStock)+' L':'—'}</td>
       <td style="text-align:right">${receivedQty>0?fmt.num(receivedQty)+' L':'Nil'}</td>
-      <td style="text-align:right;font-weight:600">${fmt.num(meterSales)} L</td>
+      <td style="text-align:right">${fmt.num(salesByMeter)} L</td>
+      <td style="text-align:right">${pumpTest>0?fmt.num(pumpTest)+' L':'—'}</td>
+      <td style="text-align:right;font-weight:600">${fmt.num(netSales)} L</td>
+      <td style="text-align:right">${bookClose!=null?fmt.num(bookClose)+' L':'—'}</td>
+      <td style="text-align:right">${closeEntry?.dipCm!=null?fmt.num(closeEntry.dipCm)+' cm':'—'}</td>
       <td style="text-align:right">${closeStock!=null?fmt.num(closeStock)+' L':'—'}</td>
+      <td style="text-align:right;color:${closeEntry?.waterDip?'#b45309':'#999'}">${closeEntry?.waterDip!=null?fmt.num(closeEntry.waterDip)+' cm':'—'}</td>
       <td style="text-align:right;color:${variationFlag?'#b91c1c':variation!=null?'#15803d':'#999'};font-weight:${variationFlag?'700':'400'}">
         ${variation!=null?fmt.num(variation)+' L':'—'}${variationPct!=null?' ('+Math.abs(variationPct).toFixed(2)+'%)':''}${variationFlag?' ⚠':''}
       </td>
@@ -7433,15 +7550,19 @@ async function generateDailySalesStatement(){
       <thead><tr style="background:#e8f0fe">
         <th style="padding:4px 5px;text-align:left">Product</th>
         <th style="text-align:right">RSP (₹/L)</th>
-        
-        <th style="text-align:right">Opening Stock</th>
-        <th style="text-align:right">Receipts</th>
-        <th style="text-align:right">Meter Sales</th>
-        <th style="text-align:right">Book Closing</th>
-        <th style="text-align:right">Dip Closing</th>
+        <th style="text-align:right">Opening Stock (A)</th>
+        <th style="text-align:right">Receipt (B)</th>
+        <th style="text-align:right">Sales by Meter (D)</th>
+        <th style="text-align:right">Pump Test (E)</th>
+        <th style="text-align:right">Net Sales (F=D-E)</th>
+        <th style="text-align:right">Closing Stock (G=C-F)</th>
+        <th style="text-align:right">Dip (cm)</th>
+        <th style="text-align:right">Dip Stock (H)</th>
+        <th style="text-align:right">Water Dip (cm)</th>
+        <th style="text-align:right">Variation (H-G)</th>
         <th style="text-align:left">Lorry / Invoice</th>
       </thead>
-      <tbody>${rspRows||'<tr><td colspan="9" style="text-align:center;color:#888;padding:6px">No product data</td></tr>'}</tbody>
+      <tbody>${rspRows||'<tr><td colspan="13" style="text-align:center;color:#888;padding:6px">No product data</td></tr>'}</tbody>
     </table>
     <p style="font-size:9px;color:#b91c1c;margin:2px 0">⚠ Variation &gt;0.5% of throughput must be reported to OMC Territory Officer immediately (MDG Clause 7.4)</p>
 
@@ -7498,74 +7619,111 @@ async function generateDipRegister(){
   const monthStr=document.getElementById('dip-month')?.value||fmt.today().slice(0,7);
   const [y,m]=monthStr.split('-').map(Number);
   const days=new Date(y,m,0).getDate();
-  const dips=DB.listKeys('pbms_dip_').map(k=>DB.get(k)).filter(d=>d&&d.date&&d.date.startsWith(monthStr));
-  const dipByDate={};
-  dips.forEach(d=>{dipByDate[d.date]=d;});
-  const purchases=DB.listActive('pbms_purchase_').filter(p=>p&&p.date&&p.date.startsWith(monthStr));
-  const receiptsByDate={};
-  purchases.forEach(p=>{
-    if(!receiptsByDate[p.date])receiptsByDate[p.date]={};
-    receiptsByDate[p.date][p.product]=(receiptsByDate[p.date][p.product]||0)+(p.quantity||0);
-  });
+  const from=`${monthStr}-01`;const to=`${monthStr}-${String(days).padStart(2,'0')}`;
 
-  // Products from settings + dip entries
+  const dipsAll=DB.listKeys('pbms_dip_').map(k=>DB.get(k)).filter(Boolean);
   const settingsProducts=(settings.products||[]).filter(p=>p.active!==false).map(p=>({id:p.id||p.name,name:p.name||p.id}));
-  const dipProducts=[...new Set(dips.flatMap(d=>(d.entries||[]).map(e=>e.product)))];
+  const dipProducts=[...new Set(dipsAll.flatMap(d=>(d.entries||[]).map(e=>e.product)))];
   const allProducts=[...new Map([...settingsProducts,...dipProducts.map(id=>({id,name:id}))].map(p=>[p.id,p])).values()];
 
-  const getDipEntry=(date,product)=>{
-    const rec=dipByDate[date];if(!rec)return null;
-    return (rec.entries||[]).find(e=>e.product===product)||null;
-  };
+  // Build the same cache shape the Stock Ledger tab uses, extended 3 months back so
+  // opening/carry-forward figures are accurate across the month boundary.
+  const extFrom=(()=>{const d=new Date(from);d.setMonth(d.getMonth()-3);return d.toISOString().split('T')[0];})();
+  const cache={purchases:{},dips:{},dipMeta:{},sales:{},tests:{},openings:{}};
+  for(const p of allProducts){const o=DB.get(`pbms_opening_stock_${p.id}`);if(o)cache.openings[p.id]=o;}
+  const purKeys=DB.listActive('pbms_purchase_');
+  for(const p of purKeys){if(!p||p.date<extFrom||p.date>to)continue;
+    const key=`${p.date}_${p.product}`;cache.purchases[key]=(cache.purchases[key]||0)+(p.quantity||0);}
+  for(const d of dipsAll){if(!d||!d.date||d.date>to)continue;
+    for(const e of(d.entries||[])){
+      if(e.physicalStock!=null)cache.dips[`${d.date}_${e.product}`]=e.physicalStock;
+      cache.dipMeta[`${d.date}_${e.product}`]={dipCm:e.dipCm??null,waterDip:e.waterDip??null,remarks:e.remarks||''};
+    }}
+  const sessKeys=DB.listKeys('pbms_session_');
+  for(const k of sessKeys){const s=DB.get(k);if(!s||s.status!=='Settled'||s.checkInDate<from||s.checkInDate>to)continue;
+    for(const n of(s.assignedNozzles||[])){const key=`${s.checkInDate}_${n.product}`;
+      cache.sales[key]=(cache.sales[key]||0)+(n.netSale||0);
+      cache.tests[key]=(cache.tests[key]||0)+(n.testLitres||0);
+    }}
+  const rows=computeAllSpRows(from,to,allProducts,cache);
 
-  // Build rows per product (TNPCB wants one table per product/tank)
+  // Build one table per product/tank (TNPCB format), mirroring the Stock Ledger column set
   const productTables=allProducts.map(prod=>{
-    let runningStock=null;
-    const rows=[];
-    for(let d=1;d<=days;d++){
-      const ds=`${monthStr}-${String(d).padStart(2,'0')}`;
-      const entry=getDipEntry(ds,prod.id);
-      const receiptsQty=receiptsByDate[ds]?.[prod.id]||0;
-      const physStock=entry?.physicalStock??null;
-      // Book stock = prev running + receipts
-      const bookStock=runningStock!=null?runningStock+receiptsQty:null;
-      // Meter sales for this date for this product
-      const dipRec=dipByDate[ds];
-      const meterSales=dipRec?.meterSalesByProduct?.[prod.id]??null;
-      // Variation = physical - book
-      const variation=physStock!=null&&bookStock!=null?physStock-bookStock:null;
-      const variationPct=bookStock!=null&&bookStock>0&&variation!=null?(variation/bookStock*100):null;
+    const bodyRows=rows.map((row,idx)=>{
+      const d=row.products[prod.id]||{};
+      const dayNum=idx+1;
+      const variationPct=d.closingStock>0&&d.variation!=null?(d.variation/d.closingStock*100):null;
       const variationFlag=variationPct!=null&&Math.abs(variationPct)>0.5;
-      if(physStock!=null)runningStock=physStock;
-      rows.push(`<tr style="${d%2?'':'background:#f9fafb'}">
-        <td style="padding:2px 5px;text-align:center;font-size:10px">${d}</td>
-        <td style="font-size:10px">${ds}</td>
-        <td style="text-align:right;font-size:10px">${physStock!=null?fmt.num(physStock)+' L':'—'}</td>
-        <td style="text-align:right;font-size:10px;color:#15803d">${receiptsQty>0?'+'+fmt.num(receiptsQty):'—'}</td>
-        <td style="text-align:right;font-size:10px">${meterSales!=null?fmt.num(meterSales)+' L':'—'}</td>
-        <td style="text-align:right;font-size:10px">${bookStock!=null?fmt.num(bookStock)+' L':'—'}</td>
-        <td style="text-align:right;font-size:10px;font-weight:${variationFlag?700:400};color:${variationFlag?'#b91c1c':variation!=null?'#15803d':'#999'}">
-          ${variation!=null?fmt.num(variation)+' L':'—'}${variationPct!=null?' ('+Math.abs(variationPct).toFixed(2)+'%)':''}${variationFlag?' ⚠':''}
+      const varColor=variationFlag?'#b91c1c':d.variation>0?'#15803d':d.variation<0?'#b91c1c':'#999';
+      return `<tr style="${dayNum%2?'':'background:#f9fafb'}">
+        <td style="padding:2px 4px;text-align:center;font-size:9px">${dayNum}</td>
+        <td style="font-size:9px">${fmt.date(row.date)}</td>
+        <td style="text-align:right;font-size:9px">${fmt.num(d.openingStock||0)}</td>
+        <td style="text-align:right;font-size:9px;color:${d.receipt>0?'#15803d':'#999'}">${d.receipt>0?'+'+fmt.num(d.receipt):'—'}</td>
+        <td style="text-align:right;font-size:9px">${fmt.num(d.totalStock||0)}</td>
+        <td style="text-align:right;font-size:9px">${fmt.num(d.salesByMeter||0)}</td>
+        <td style="text-align:right;font-size:9px">${d.pumpTest>0?fmt.num(d.pumpTest):'—'}</td>
+        <td style="text-align:right;font-size:9px;font-weight:600">${fmt.num(d.netSales||0)}</td>
+        <td style="text-align:right;font-size:9px;color:#666">${fmt.num(d.cumSale||0)}</td>
+        <td style="text-align:right;font-size:9px;font-weight:600">${fmt.num(d.closingStock||0)}</td>
+        <td style="text-align:right;font-size:9px">${d.dipCm!=null?fmt.num(d.dipCm):'—'}</td>
+        <td style="text-align:right;font-size:9px">${d.dip!=null?fmt.num(d.dip):'—'}</td>
+        <td style="text-align:right;font-size:9px;font-weight:${variationFlag?700:400};color:${varColor}">
+          ${d.variation!=null?(d.variation>0?'+':'')+fmt.num(d.variation):'—'}${variationPct!=null?' ('+Math.abs(variationPct).toFixed(2)+'%)':''}${variationFlag?' ⚠':''}
         </td>
+        <td style="text-align:right;font-size:9px;color:${d.cumVariation<0?'#b91c1c':d.cumVariation>0?'#15803d':'#999'}">${(d.cumVariation>0?'+':'')+fmt.num(d.cumVariation||0)}</td>
+        <td style="text-align:right;font-size:9px;color:${d.waterDip?'#b45309':'#999'}">${d.waterDip!=null?fmt.num(d.waterDip):'—'}</td>
+        <td style="font-size:9px">${d.remarks||''}</td>
         <td style="font-size:9px">&nbsp;</td>
-      </tr>`);
-    }
+      </tr>`;
+    }).join('');
+    const totalReceipt=rows.reduce((s,r)=>s+(r.products[prod.id]?.receipt||0),0);
+    const totalMeter=rows.reduce((s,r)=>s+(r.products[prod.id]?.salesByMeter||0),0);
+    const totalTest=rows.reduce((s,r)=>s+(r.products[prod.id]?.pumpTest||0),0);
+    const totalNet=rows.reduce((s,r)=>s+(r.products[prod.id]?.netSales||0),0);
+    const totalVar=rows.reduce((s,r)=>{const v=r.products[prod.id]?.variation;return v!=null?s+v:s;},0);
     return `
-      <div style="margin-bottom:14px">
+      <div style="margin-bottom:14px;page-break-inside:avoid">
         <div style="font-weight:bold;background:#1e3a5f;color:#fff;padding:4px 6px;font-size:11px">
           PRODUCT: ${prod.name} &nbsp;|&nbsp; Tank ID: ${(settings.products||[]).find(p=>(p.id||p.name)===prod.id)?.tankId||'—'}
         </div>
-        <table style="width:100%;border-collapse:collapse;font-size:11px">
-          <thead><tr style="background:#e8f0fe;font-size:10px">
-            <th style="padding:3px 5px">Day</th><th>Date</th>
-            
-            <th style="text-align:right">Phys. Stock (L)</th><th style="text-align:right">Receipts</th>
-            <th style="text-align:right">Meter Sales</th><th style="text-align:right">Book Stock</th>
-            <th style="text-align:right">Variation</th><th>Initials</th>
-          </tr></thead>
-          <tbody>${rows.join('')}</tbody>
+        <table style="width:100%;border-collapse:collapse;font-size:10px">
+          <thead>
+            <tr style="background:#e8f0fe">
+              <th style="padding:3px 4px">Day</th><th>Date</th>
+              <th style="text-align:right">Opening<br>Stock (A)</th>
+              <th style="text-align:right">Receipt<br>(B)</th>
+              <th style="text-align:right">Total Stock<br>(C=A+B)</th>
+              <th style="text-align:right">Sales by<br>Meter (D)</th>
+              <th style="text-align:right">Pump<br>Test (E)</th>
+              <th style="text-align:right">Net Sales<br>(F=D-E)</th>
+              <th style="text-align:right">Cum.<br>Sales</th>
+              <th style="text-align:right">Closing<br>Stock (G=C-F)</th>
+              <th style="text-align:right">Dip<br>(cm)</th>
+              <th style="text-align:right">Dip Stock<br>(H)</th>
+              <th style="text-align:right">Variation<br>(H-G)</th>
+              <th style="text-align:right">Cum.<br>Variation</th>
+              <th style="text-align:right">Water<br>Dip (cm)</th>
+              <th>Remarks</th><th>Initials</th>
+            </tr>
+          </thead>
+          <tbody>${bodyRows}</tbody>
+          <tfoot>
+            <tr style="background:#f1f5f9;font-weight:700;border-top:2px solid #1e3a5f">
+              <td colspan="3" style="padding:3px 4px;text-align:right">TOTAL</td>
+              <td style="text-align:right">${totalReceipt>0?fmt.num(totalReceipt):'—'}</td>
+              <td>&nbsp;</td>
+              <td style="text-align:right">${fmt.num(totalMeter)}</td>
+              <td style="text-align:right">${totalTest>0?fmt.num(totalTest):'—'}</td>
+              <td style="text-align:right">${fmt.num(totalNet)}</td>
+              <td colspan="2">&nbsp;</td>
+              <td colspan="2">&nbsp;</td>
+              <td style="text-align:right;color:${totalVar<0?'#b91c1c':totalVar>0?'#15803d':'#000'}">${(totalVar>0?'+':'')+fmt.num(totalVar)}</td>
+              <td colspan="3">&nbsp;</td>
+            </tr>
+          </tfoot>
         </table>
-        <p style="font-size:9px;color:#b91c1c;margin:2px 0">⚠ Variation &gt;0.5% of book stock must be reported to OMC Territory Officer (MDG Clause 7.4 / TNPCB Rule 12)</p>
+        <p style="font-size:9px;color:#b91c1c;margin:2px 0">⚠ Variation &gt;0.5% of closing stock must be reported to OMC Territory Officer (MDG Clause 7.4 / TNPCB Rule 12)</p>
       </div>`;
   }).join('');
 
@@ -7579,7 +7737,7 @@ async function generateDipRegister(){
       📌 Dip readings must be taken at 6:00 AM and 10:00 PM daily. Water dip must be checked weekly minimum.
       All entries to be countersigned by Supervisor. Density to be recorded from delivery note or in-house densitometer.
     </p>
-    ${productTables||'<p style="text-align:center;color:#888;padding:20px">No dip data entered for this month. Enter readings under Dip Measurements tab daily.</p>'}
+    ${allProducts.length?productTables:'<p style="text-align:center;color:#888;padding:20px">No dip data entered for this month. Enter readings under Dip Measurements tab daily.</p>'}
     <div style="margin-top:20px;display:flex;justify-content:space-between">
       <div style="text-align:center"><div style="border-top:1px solid #000;width:130px;margin:24px auto 0"></div><div style="font-size:9px">Surveyor / Supervisor</div></div>
       <div style="text-align:center"><div style="border-top:1px solid #000;width:130px;margin:24px auto 0"></div><div style="font-size:9px">Dealer Signature &amp; Stamp</div></div>
