@@ -3765,13 +3765,16 @@ function spOnDipChange(inp){
 // Show inline dip detail popup for MDG-required extra fields (cm, water dip, density, temp)
 function showDipDetail(btn,date,product){
   // Close any open popover first
-  document.querySelectorAll('.dip-detail-pop').forEach(el=>el.remove());
+  document.querySelectorAll('.dip-detail-pop,.dip-detail-backdrop').forEach(el=>el.remove());
   const dipKey=`pbms_dip_${date}`;
   const rec=DB.get(dipKey)||{date,entries:[]};
   const entry=(rec.entries||[]).find(e=>e.product===product)||{};
+  const backdrop=document.createElement('div');
+  backdrop.className='dip-detail-backdrop';
+  backdrop.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,0.35);z-index:9998;';
   const pop=document.createElement('div');
   pop.className='dip-detail-pop';
-  pop.style.cssText='position:absolute;z-index:9999;background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px;box-shadow:0 4px 16px rgba(0,0,0,0.12);min-width:220px;font-size:12px';
+  pop.style.cssText='position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:9999;background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:14px;box-shadow:0 10px 40px rgba(0,0,0,0.25);width:min(320px,92vw);max-height:88vh;overflow-y:auto;font-size:12px';
   pop.innerHTML=`<div style="font-weight:700;color:#1e3a5f;margin-bottom:8px;font-size:11px">${product} Dip Details — ${date}</div>
     <div style="display:grid;gap:6px">
       <div><label style="font-size:10px;color:#64748b;display:block">Physical Stock (L) *</label>
@@ -3787,17 +3790,14 @@ function showDipDetail(btn,date,product){
       <div><label style="font-size:10px;color:#64748b;display:block">Remarks</label>
         <input type="text" id="dp-remarks" value="${(entry.remarks||'').replace(/"/g,'&quot;')}" placeholder="Optional note" class="form-input" style="font-size:12px;padding:4px 8px"></div>
     </div>
-    <div style="display:flex;gap:6px;margin-top:8px">
-      <button onclick="saveDipDetail('${date}','${product}')" style="flex:1;background:#1e3a5f;color:#fff;border:none;border-radius:6px;padding:5px 8px;cursor:pointer;font-size:11px;font-weight:600">Save</button>
-      <button onclick="this.closest('.dip-detail-pop').remove()" style="background:#f1f5f9;border:none;border-radius:6px;padding:5px 8px;cursor:pointer;font-size:11px">Cancel</button>
+    <div style="display:flex;gap:6px;margin-top:10px">
+      <button onclick="saveDipDetail('${date}','${product}')" style="flex:1;background:#1e3a5f;color:#fff;border:none;border-radius:6px;padding:7px 8px;cursor:pointer;font-size:11px;font-weight:600">Save</button>
+      <button onclick="document.querySelector('.dip-detail-backdrop')?.remove();this.closest('.dip-detail-pop').remove()" style="background:#f1f5f9;border:none;border-radius:6px;padding:7px 8px;cursor:pointer;font-size:11px">Cancel</button>
     </div>`;
-  // Position near the button
-  const rect=btn.getBoundingClientRect();
-  const scrollTop=window.scrollY||document.documentElement.scrollTop;
-  pop.style.top=(rect.bottom+scrollTop+4)+'px';
-  pop.style.left=Math.max(4,rect.left-80)+'px';
+  const closeAll=()=>{backdrop.remove();pop.remove();};
+  backdrop.onclick=closeAll;
+  document.body.appendChild(backdrop);
   document.body.appendChild(pop);
-  setTimeout(()=>document.addEventListener('click',function h(e){if(!pop.contains(e.target)&&e.target!==btn){pop.remove();document.removeEventListener('click',h);}},{capture:true}),100);
   document.getElementById('dp-litres')?.focus();
 }
 
@@ -3827,6 +3827,7 @@ async function saveDipDetail(date,product){
   const inp=document.querySelector(`.sp-dip-inp[data-date="${date}"][data-product="${product}"]`);
   if(inp){inp.value=litres>0?litres:'';}
   document.querySelector('.dip-detail-pop')?.remove();
+  document.querySelector('.dip-detail-backdrop')?.remove();
   toast(`Dip saved — ${product} ${litres}L`+(dipCm?` | ${dipCm}cm`:'')+(waterDip?` | Water:${waterDip}cm`:''),'success');
 }
 
@@ -4779,6 +4780,9 @@ function csRecalc(row){
 }
 
 async function saveCreditSale(custId){
+  if(APP._savingCreditSale)return;
+  APP._savingCreditSale=true;
+  try{
   if(!_csRows.length){toast('Add at least one row','error');return;}
   const cust=DB.getActive(`pbms_customer_${custId}`);
   const prepared=[];
@@ -4835,6 +4839,7 @@ async function saveCreditSale(custId){
   toast(msg,'success');
   _csRows=[];
   closeModal();await loadCreditTab('credit');
+  } finally { APP._savingCreditSale=false; }
 }
 
 async function showPaymentModal(custId){
@@ -4868,6 +4873,9 @@ async function showPaymentModal(custId){
 }
 
 async function savePayment(custId){
+  if(APP._savingPayment)return;
+  APP._savingPayment=true;
+  try{
   const date=document.getElementById('pay-date')?.value;
   const amt=parseFloat(document.getElementById('pay-amt')?.value)||0;
   if(!date||amt<=0){toast('Fill all required fields','error');return;}
@@ -4881,6 +4889,7 @@ async function savePayment(custId){
   const resultMsg=newBal<0?`Due: ${fmt.currency(-newBal)}`:newBal>0?`Advance: ${fmt.currency(newBal)}`:'Account settled';
   toast(`Payment of ${fmt.currency(amt)} recorded. ${resultMsg}`,'success');
   closeModal();await loadCreditTab('credit');
+  } finally { APP._savingPayment=false; }
 }
 
 async function showCustomerLedger(custId){
@@ -4914,7 +4923,7 @@ async function showCustomerLedger(custId){
     </div>
     <div class="overflow-x-auto overflow-y-auto" style="max-height:65vh">
       <table class="data-table text-sm"><thead><tr><th>Date</th><th>Type</th><th>Description</th><th class="text-right">Debit ₹</th><th class="text-right">Credit ₹</th><th class="text-right">Account Balance</th><th class="no-print">Actions</th></tr></thead>
-      <tbody>${rows.length?rows.map(r=>`<tr><td>${fmt.date(r.date)}<div class="text-xs text-slate-400">${fmt.timeOf(r.createdAt)}</div></td>
+      <tbody>${rows.length?[...rows].reverse().map(r=>`<tr><td>${fmt.date(r.date)}<div class="text-xs text-slate-400">${fmt.timeOf(r.createdAt)}</div></td>
         <td><span class="badge ${typeBadge[r.type]||'badge-gray'} text-xs">${r.type}</span></td>
         <td>${r.desc}</td>
         <td class="text-right ${r.debit>0?'text-red-600':''}">${r.debit>0?fmt.currency(r.debit):'—'}</td>
@@ -5272,6 +5281,9 @@ async function showAddLoanModal(){
 }
 
 async function saveLoan(existingId,force){
+  if(APP._savingLoan)return;
+  APP._savingLoan=true;
+  try{
   const lender=document.getElementById('loan-lender')?.value?.trim();
   const date=document.getElementById('loan-date')?.value;
   const principal=parseFloat(document.getElementById('loan-principal')?.value)||0;
@@ -5309,6 +5321,7 @@ async function saveLoan(existingId,force){
   toast(existingId?'Loan updated':'Loan added','success');
   closeModal();
   await loadCreditTab('loan');
+  } finally { APP._savingLoan=false; }
 }
 
 async function deleteLoan(id){
@@ -5392,6 +5405,9 @@ async function showRepaymentModal(loanId){
 }
 
 async function saveRepayment(loanId){
+  if(APP._savingRepayment)return;
+  APP._savingRepayment=true;
+  try{
   const date=document.getElementById('rep-date')?.value;
   const amt=parseFloat(document.getElementById('rep-amt')?.value)||0;
   if(!date){toast('Select a date','error');return;}
@@ -5420,6 +5436,7 @@ async function saveRepayment(loanId){
   toast(`Repayment of ${fmt.currency(amt)} saved. Outstanding: ${fmt.currency(newOut)}`,'success');
   closeModal();
   await loadCreditTab('loan');
+  } finally { APP._savingRepayment=false; }
 }
 
 async function showLoanLedger(loanId){
@@ -5486,15 +5503,6 @@ async function showLoanLedger(loanId){
           <th class="no-print">Actions</th>
         </tr></thead>
         <tbody>
-          ${rows.map(r=>`<tr>
-            <td class="whitespace-nowrap">${fmt.date(r.date)}<div class="text-xs text-slate-400">${fmt.timeOf(r.createdAt)}</div></td>
-            <td><span class="badge ${r.type==='Loan Taken'?'badge-red':'badge-green'} text-xs">${r.type}</span></td>
-            <td class="text-slate-600">${r.desc}</td>
-            <td class="text-right font-mono">${r.debit>0?fmt.currency(r.debit):'—'}</td>
-            <td class="text-right font-mono text-green-700">${r.credit>0?fmt.currency(r.credit):'—'}</td>
-            <td class="text-right font-mono font-semibold ${r.balance>0?'text-red-600':'text-green-700'}">${fmt.currency(r.balance)}</td>
-            <td class="no-print whitespace-nowrap">${r.id?`<button onclick="editRepayment('${r.id}','${loanId}')" class="btn btn-sm btn-gray-sm">Edit</button> <button onclick="deleteRepayment('${r.id}','${loanId}')" class="btn btn-sm btn-red-sm">Del</button>`:'<span class="text-xs text-slate-400">—</span>'}</td>
-          </tr>`).join('')}
           ${interest>0?`<tr class="bg-amber-50">
             <td class="whitespace-nowrap">${fmt.date(today)}</td>
             <td><span class="badge badge-amber text-xs">Interest</span></td>
@@ -5504,6 +5512,15 @@ async function showLoanLedger(loanId){
             <td class="text-right font-mono font-semibold text-amber-700">${fmt.currency(outstanding+interest)}</td>
             <td class="no-print">—</td>
           </tr>`:''}
+          ${[...rows].reverse().map(r=>`<tr>
+            <td class="whitespace-nowrap">${fmt.date(r.date)}<div class="text-xs text-slate-400">${fmt.timeOf(r.createdAt)}</div></td>
+            <td><span class="badge ${r.type==='Loan Taken'?'badge-red':'badge-green'} text-xs">${r.type}</span></td>
+            <td class="text-slate-600">${r.desc}</td>
+            <td class="text-right font-mono">${r.debit>0?fmt.currency(r.debit):'—'}</td>
+            <td class="text-right font-mono text-green-700">${r.credit>0?fmt.currency(r.credit):'—'}</td>
+            <td class="text-right font-mono font-semibold ${r.balance>0?'text-red-600':'text-green-700'}">${fmt.currency(r.balance)}</td>
+            <td class="no-print whitespace-nowrap">${r.id?`<button onclick="editRepayment('${r.id}','${loanId}')" class="btn btn-sm btn-gray-sm">Edit</button> <button onclick="deleteRepayment('${r.id}','${loanId}')" class="btn btn-sm btn-red-sm">Del</button>`:'<span class="text-xs text-slate-400">—</span>'}</td>
+          </tr>`).join('')}
         </tbody>
       </table>
     </div>
@@ -5772,7 +5789,7 @@ async function loadDailyBankBookForDate(date){
         <th>Time</th><th>Description</th><th>Type</th><th>Ref</th>
         <th class="text-right">In ₹</th><th class="text-right">Out ₹</th><th class="text-right">Balance ₹</th>
       </tr></thead><tbody>
-      ${dayRows.map(r=>`<tr>
+      ${[...dayRows].reverse().map(r=>`<tr>
         <td class="whitespace-nowrap text-xs text-slate-400">${fmt.timeOf(r.createdAt)||'—'}</td>
         <td class="max-w-xs text-sm">${r.desc}</td>
         <td><span class="badge ${bankTypeStyle(r.type)} text-xs">${r.type}</span></td>
@@ -5918,7 +5935,7 @@ async function loadBankBook(){
         <th>Date</th><th>Description</th><th>Type</th><th>Ref</th>
         <th class="text-right">In ₹</th><th class="text-right">Out ₹</th><th class="text-right">Balance ₹</th>
       </tr></thead><tbody>
-      ${rows.map(r=>`<tr>
+      ${[...rows].reverse().map(r=>`<tr>
         <td class="whitespace-nowrap text-xs">${fmt.date(r.date)}<div class="text-slate-400">${fmt.timeOf(r.createdAt)}</div></td>
         <td class="max-w-xs text-sm">${r.desc}</td>
         <td><span class="badge ${bankTypeStyle(r.type)} text-xs">${r.type}</span></td>
@@ -7227,7 +7244,6 @@ async function renderReports(el){
     <button data-rtab="credit"     class="tab-btn ${tab==='credit'?'active':''}"     onclick="switchReportTab('credit')">Credit Transactions</button>
     <button data-rtab="loan"       class="tab-btn ${tab==='loan'?'active':''}"       onclick="switchReportTab('loan')">Loan Transactions</button>
     <button data-rtab="profit"     class="tab-btn ${tab==='profit'?'active':''}"     onclick="switchReportTab('profit')">Profit</button>
-    <button data-rtab="compliance" class="tab-btn ${tab==='compliance'?'active':''}" onclick="switchReportTab('compliance')">📋 Compliance</button>
     <button data-rtab="shopgst"     class="tab-btn ${tab==='shopgst'?'active':''}"     onclick="switchReportTab('shopgst')">🧾 GST Summary</button>
     <button data-rtab="shoppnl"     class="tab-btn ${tab==='shoppnl'?'active':''}"     onclick="switchReportTab('shoppnl')">💹 Shop P&amp;L</button>
     <button data-rtab="shopdaybook" class="tab-btn ${tab==='shopdaybook'?'active':''}" onclick="switchReportTab('shopdaybook')">📖 Shop Day Book</button>
@@ -7250,7 +7266,7 @@ async function loadReportTab(tab){
   if(tab==='daily'){await renderDailyReport(el);return;}
   if(tab==='profit'){await renderProfitTab(el);return;}
   if(tab==='loan'){await renderLoanTransactionsReport(el);return;}
-  if(tab==='compliance'){await renderComplianceReports(el);return;}
+  if(tab==='compliance'){tab='daily';await renderDailyReport(el);return;}
   if(tab==='shopgst'){await renderShopGSTReport(el);return;}
   if(tab==='shoppnl'){await renderShopPnLReport(el);return;}
   if(tab==='shopdaybook'){await renderShopDaybookReport(el);return;}
@@ -7279,901 +7295,6 @@ async function loadReportTab(tab){
   }
 }
 
-// ====================================================
-// COMPLIANCE REPORTS — OMC / TNPCB / CCOE formats
-// Generates printable/downloadable compliance documents
-// ====================================================
-async function renderComplianceReports(el){
-  const settings=APP.settings||{};
-  const today=fmt.today();
-  const mStr=today.slice(0,7);
-  el.innerHTML=`
-  <div class="space-y-5">
-    <!-- Header -->
-    <div class="bg-blue-50 border border-blue-200 rounded-xl p-4">
-      <h3 class="font-bold text-blue-900 text-base mb-1">📋 Regulatory Compliance Reports</h3>
-      <p class="text-sm text-blue-700">Generates reports in formats required by Indian petroleum dealers — OMC (IOCL/BPCL/HPCL), TNPCB, and CCOE / PESO. Select a report type and date range, then print or download as PDF.</p>
-    </div>
-
-    <!-- Report selector -->
-    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-      <!-- Dip Register -->
-      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
-        <div class="flex items-center gap-3 mb-3">
-          <div class="w-9 h-9 bg-green-100 rounded-lg flex items-center justify-center text-lg">🛢️</div>
-          <div>
-            <div class="font-semibold text-slate-800 text-sm">Dip Measurement Register</div>
-            <div class="text-xs text-slate-500">TNPCB / OMC Format-3</div>
-          </div>
-        </div>
-        <p class="text-xs text-slate-500 mb-3">Daily tank dip readings, stock reconciliation and overage/shortage — required by TNPCB and OMC monthly submission.</p>
-        <div class="flex items-center gap-2 mb-3">
-          <input type="month" id="dip-month" class="form-input text-xs flex-1" value="${mStr}">
-        </div>
-        <button onclick="generateDipRegister()" class="btn btn-primary btn-sm w-full">Generate Report</button>
-      </div>
-
-      <!-- Daily Sales Statement -->
-      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
-        <div class="flex items-center gap-3 mb-3">
-          <div class="w-9 h-9 bg-blue-100 rounded-lg flex items-center justify-center text-lg">📊</div>
-          <div>
-            <div class="font-semibold text-slate-800 text-sm">Daily Sales Statement</div>
-            <div class="text-xs text-slate-500">OMC Format-1 / PESO</div>
-          </div>
-        </div>
-        <p class="text-xs text-slate-500 mb-3">Nozzle-wise daily product sales with meter readings, prices, and collection mode — standard OMC format.</p>
-        <div class="flex items-center gap-2 mb-3">
-          <input type="date" id="dss-date" class="form-input text-xs flex-1" value="${today}" max="${today}">
-        </div>
-        <button onclick="generateDailySalesStatement()" class="btn btn-primary btn-sm w-full">Generate Report</button>
-      </div>
-
-      <!-- Monthly Stock Account -->
-      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
-        <div class="flex items-center gap-3 mb-3">
-          <div class="w-9 h-9 bg-purple-100 rounded-lg flex items-center justify-center text-lg">📦</div>
-          <div>
-            <div class="font-semibold text-slate-800 text-sm">Monthly Stock Account</div>
-            <div class="text-xs text-slate-500">OMC Format-2</div>
-          </div>
-        </div>
-        <p class="text-xs text-slate-500 mb-3">Opening stock, receipts, sales, and closing stock by product — mandatory OMC monthly reconciliation statement.</p>
-        <div class="flex items-center gap-2 mb-3">
-          <input type="month" id="msa-month" class="form-input text-xs flex-1" value="${mStr}">
-        </div>
-        <button onclick="generateMonthlyStockAccount()" class="btn btn-primary btn-sm w-full">Generate Report</button>
-      </div>
-
-      <!-- Shortage/Excess Register -->
-      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
-        <div class="flex items-center gap-3 mb-3">
-          <div class="w-9 h-9 bg-amber-100 rounded-lg flex items-center justify-center text-lg">⚖️</div>
-          <div>
-            <div class="font-semibold text-slate-800 text-sm">Shortage / Excess Register</div>
-            <div class="text-xs text-slate-500">Internal Audit / OMC</div>
-          </div>
-        </div>
-        <p class="text-xs text-slate-500 mb-3">Shift-wise shortage and excess with running balance — required for internal audit and OMC inspection.</p>
-        <div class="flex items-center gap-2 mb-3">
-          <input type="month" id="se-month" class="form-input text-xs flex-1" value="${mStr}">
-        </div>
-        <button onclick="generateSERegister()" class="btn btn-primary btn-sm w-full">Generate Report</button>
-      </div>
-
-      <!-- Credit Sales Register -->
-      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
-        <div class="flex items-center gap-3 mb-3">
-          <div class="w-9 h-9 bg-red-100 rounded-lg flex items-center justify-center text-lg">📝</div>
-          <div>
-            <div class="font-semibold text-slate-800 text-sm">Credit Sales Register</div>
-            <div class="text-xs text-slate-500">OMC / Income Tax</div>
-          </div>
-        </div>
-        <p class="text-xs text-slate-500 mb-3">Customer-wise credit outstanding and settlement history — needed for OMC credit approvals and IT assessments.</p>
-        <div class="flex items-center gap-2 mb-3">
-          <input type="month" id="cr-month" class="form-input text-xs flex-1" value="${mStr}">
-        </div>
-        <button onclick="generateCreditRegister()" class="btn btn-primary btn-sm w-full">Generate Report</button>
-      </div>
-
-      <!-- Staff Muster Roll -->
-      <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
-        <div class="flex items-center gap-3 mb-3">
-          <div class="w-9 h-9 bg-teal-100 rounded-lg flex items-center justify-center text-lg">👷</div>
-          <div>
-            <div class="font-semibold text-slate-800 text-sm">Staff Muster Roll</div>
-            <div class="text-xs text-slate-500">Labour Dept. / OMC</div>
-          </div>
-        </div>
-        <p class="text-xs text-slate-500 mb-3">Monthly attendance and wages register — required by Labour Department and OMC for audit compliance.</p>
-        <div class="flex items-center gap-2 mb-3">
-          <input type="month" id="mr-month" class="form-input text-xs flex-1" value="${mStr}">
-        </div>
-        <button onclick="generateMusterRoll()" class="btn btn-primary btn-sm w-full">Generate Report</button>
-      </div>
-    </div>
-
-    <!-- Report output area -->
-    <div id="compliance-output" class="hidden"></div>
-  </div>`;
-}
-
-// ── Compliance report generators ──────────────────────────────────────────────
-
-function _complianceHeader(settings,reportTitle,subTitle,date){
-  return `<div class="compliance-header print:block">
-    <table style="width:100%;border:none;margin-bottom:8px">
-      <tr><td style="text-align:left;font-size:11px;color:#666">${settings.oilCompany||'Oil Company'} | ${settings.licenseNo?'Lic: '+settings.licenseNo:''}</td>
-          <td style="text-align:center;font-size:16px;font-weight:bold">${reportTitle}</td>
-          <td style="text-align:right;font-size:11px;color:#666">${date}</td></tr>
-      <tr><td colspan="3" style="text-align:center;font-size:13px;font-weight:600">${settings.stationName||'Petrol Station'} | ${settings.dealerName||''} | ${settings.location||''}</td></tr>
-      ${subTitle?`<tr><td colspan="3" style="text-align:center;font-size:11px;color:#555;padding-top:2px">${subTitle}</td></tr>`:''}
-    </table>
-    <hr style="border:1.5px solid #000;margin:4px 0">
-  </div>`;
-}
-
-function _showComplianceReport(html){
-  const out=document.getElementById('compliance-output');
-  if(!out)return;
-  out.classList.remove('hidden');
-  out.innerHTML=`<div class="bg-white border border-slate-200 rounded-xl p-4 mt-4">
-    <div class="flex items-center justify-between mb-3 no-print">
-      <span class="text-sm font-semibold text-slate-700">Generated Report</span>
-      <button onclick="window.print()" class="btn btn-primary btn-sm flex items-center gap-2">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
-        Print / Save PDF
-      </button>
-    </div>
-    <div id="compliance-report-body" style="font-family:Arial,sans-serif;font-size:12px">${html}</div>
-  </div>`;
-  out.scrollIntoView({behavior:'smooth',block:'start'});
-}
-
-async function generateDailySalesStatement(){
-  const settings=APP.settings||{};
-  const dateStr=document.getElementById('dss-date')?.value||fmt.today();
-  const sessions=await dbRangeQuery('sessions','checkInDate',dateStr,dateStr);
-  const settled=sessions.map(r=>r.data||r).filter(s=>s.status==='Settled');
-
-  // Staff name lookup
-  const staffMap={};
-  DB.listKeys('pbms_staff_').forEach(k=>{const s=DB.get(k);if(s&&s.id)staffMap[s.id]=s.name||s.id;});
-
-  // Product RSP (from settings.products) and W&M seal (from settings.nozzles)
-  const prodMeta={};
-  (settings.products||[]).forEach(p=>{prodMeta[p.id||p.name]={name:p.name||p.id,rate:p.rate||0,unit:p.unit||'L'};});
-
-  // Day's tank lorry receipts
-  const receipts=DB.listActive('pbms_purchase_').filter(p=>p&&p.date===dateStr);
-
-  // Dip readings for start (prev day or today opening) and end of day
-  const dipToday=DB.get(`pbms_dip_${dateStr}`);
-  const prevDate=new Date(dateStr); prevDate.setDate(prevDate.getDate()-1);
-  const prevDateStr=prevDate.toISOString().slice(0,10);
-  const dipPrev=DB.get(`pbms_dip_${prevDateStr}`);
-
-  // Group nozzles by product using paise
-  const productMap={};
-  settled.forEach(s=>(s.assignedNozzles||[]).forEach(n=>{
-    if(!productMap[n.product])productMap[n.product]={nozzles:[],totalLitres100:0,totalTestLitres100:0,totalAmtPaise:0};
-    productMap[n.product].nozzles.push({...n,employeeName:staffMap[s.employeeId]||s.employeeId||'-',checkInTime:s.checkInTime||'',checkOutTime:s.checkOutTime||''});
-    productMap[n.product].totalLitres100+=(n.netSalePaise!=null?n.netSalePaise:Math.round((n.netSale||0)*100));
-    productMap[n.product].totalTestLitres100+=Math.round((n.testLitres||0)*100);
-    productMap[n.product].totalAmtPaise+=(n.amountPaise!=null?n.amountPaise:Money.toPaise(n.amount||0));
-  }));
-
-  // RSP summary table per product
-  const rspRows=Object.keys(productMap).map(prod=>{
-    const meta=prodMeta[prod]||{};
-    const receiptsToday=receipts.filter(r=>r.product===prod);
-    const receivedQty=receiptsToday.reduce((a,r)=>a+(r.quantity||0),0);
-    const lorryNos=receiptsToday.map(r=>r.lorryNo||r.invoiceNo||'—').join(', ')||'Nil';
-    const openEntry=(dipPrev?.entries||[]).find(e=>e.product===prod);
-    const closeEntry=(dipToday?.entries||[]).find(e=>e.product===prod);
-    const openStock=openEntry?.physicalStock;
-    const closeStock=closeEntry?.physicalStock;
-    const pumpTest=productMap[prod].totalTestLitres100/100;
-    const netSales=productMap[prod].totalLitres100/100;
-    const salesByMeter=netSales+pumpTest;
-    const bookClose=openStock!=null?openStock+receivedQty-netSales:null;
-    const variation=bookClose!=null&&closeStock!=null?closeStock-bookClose:null;
-    const variationPct=bookClose!=null&&bookClose>0&&variation!=null?(variation/bookClose*100):null;
-    const variationFlag=variationPct!=null&&Math.abs(variationPct)>0.5;
-    return `<tr>
-      <td style="padding:3px 6px;font-weight:700">${meta.name||prod}</td>
-      <td style="text-align:right">₹${fmt.num(meta.rate||0)}/L</td>
-      <td style="text-align:right">${openStock!=null?fmt.num(openStock)+' L':'—'}</td>
-      <td style="text-align:right">${receivedQty>0?fmt.num(receivedQty)+' L':'Nil'}</td>
-      <td style="text-align:right">${fmt.num(salesByMeter)} L</td>
-      <td style="text-align:right">${pumpTest>0?fmt.num(pumpTest)+' L':'—'}</td>
-      <td style="text-align:right;font-weight:600">${fmt.num(netSales)} L</td>
-      <td style="text-align:right">${bookClose!=null?fmt.num(bookClose)+' L':'—'}</td>
-      <td style="text-align:right">${closeEntry?.dipCm!=null?fmt.num(closeEntry.dipCm)+' cm':'—'}</td>
-      <td style="text-align:right">${closeStock!=null?fmt.num(closeStock)+' L':'—'}</td>
-      <td style="text-align:right;color:${closeEntry?.waterDip?'#b45309':'#999'}">${closeEntry?.waterDip!=null?fmt.num(closeEntry.waterDip)+' cm':'—'}</td>
-      <td style="text-align:right;color:${variationFlag?'#b91c1c':variation!=null?'#15803d':'#999'};font-weight:${variationFlag?'700':'400'}">
-        ${variation!=null?fmt.num(variation)+' L':'—'}${variationPct!=null?' ('+Math.abs(variationPct).toFixed(2)+'%)':''}${variationFlag?' ⚠':''}
-      </td>
-      <td>${lorryNos}</td>
-    </tr>`;
-  }).join('');
-
-  // Nozzle detail rows
-  const nozzleRows=Object.entries(productMap).map(([prod,data])=>`
-    <tr><td colspan="9" style="background:#f0f4ff;font-weight:bold;padding:4px 6px">${prod} — RSP: ₹${fmt.num(prodMeta[prod]?.rate||0)}/L</td></tr>
-    ${data.nozzles.map((n,i)=>{
-      return `<tr>
-        <td style="padding:3px 6px">${i+1}</td>
-        <td>${n.nozzleName||n.nozzleId||'-'}</td>
-        <td>${n.employeeName}${(n.checkInTime||n.checkOutTime)?`<div style="font-size:9px;color:#999">${n.checkInTime||''}${n.checkInTime&&n.checkOutTime?'–':''}${n.checkOutTime||''}</div>`:''}</td>
-        <td style="text-align:right">${fmt.num(n.openingReading||0)}</td>
-        <td style="text-align:right">${fmt.num(n.closingReading||0)}</td>
-        <td style="text-align:right">${fmt.num(n.testLitres||0)}</td>
-        <td style="text-align:right;font-weight:600">${fmt.num(n.netSale||0)}</td>
-        <td style="text-align:right;font-weight:600">₹${fmt.num(n.amount||0)}</td>
-      </tr>`;
-    }).join('')}
-    <tr style="background:#fafafa;font-weight:bold">
-      <td colspan="7" style="padding:3px 6px;text-align:right">Sub-Total ${prod}</td>
-      <td style="text-align:right">${fmt.num(data.totalLitres100/100)} L</td>
-      <td style="text-align:right">₹${fmt.num(Money.fromPaise(data.totalAmtPaise))}</td>
-    </tr>`).join('');
-
-  const totalAmtPaise=Object.values(productMap).reduce((a,d)=>a+d.totalAmtPaise,0);
-  const totalLitres100=Object.values(productMap).reduce((a,d)=>a+d.totalLitres100,0);
-
-  const collSummary=settled.reduce((acc,s)=>{
-    const c=s.collections||{};
-    acc.cash+=c.cashAmt||Money.fromPaise(c.cashPaise||0);
-    acc.card+=c.cardAmt||Money.fromPaise(c.cardPaise||0);
-    acc.upi +=c.upiAmt ||Money.fromPaise(c.upiPaise ||0);
-    acc.credit+=c.creditAmt||Money.fromPaise(c.creditPaise||0);
-    acc.discount+=c.discountAmt||Money.fromPaise(c.discountPaise||0);
-    return acc;
-  },{cash:0,card:0,upi:0,credit:0,discount:0});
-
-  const html=`
-    ${_complianceHeader(settings,'DAILY SALES REGISTER (DSR)','HPCL Marketing Discipline Guidelines — MDG 2019 | OMC Format-1',dateStr)}
-    <div style="font-size:10px;color:#444;margin-bottom:6px">
-      RO Code: <strong>${settings.roCode||'—'}</strong> &nbsp;|&nbsp;
-      Territory: <strong>${settings.territory||'—'}</strong> &nbsp;|&nbsp;
-      Sales Officer: <strong>${settings.salesOfficer||'—'}</strong>
-    </div>
-
-    <!-- Section 1: Daily Stock Position & Variation -->
-    <div style="font-weight:bold;background:#1e3a5f;color:#fff;padding:4px 6px;margin-top:4px;font-size:11px">
-      SECTION A — DAILY STOCK POSITION &amp; DIP VARIATION
-    </div>
-    <table style="width:100%;border-collapse:collapse;font-size:11px">
-      <thead><tr style="background:#e8f0fe">
-        <th style="padding:4px 5px;text-align:left">Product</th>
-        <th style="text-align:right">RSP (₹/L)</th>
-        <th style="text-align:right">Opening Stock (A)</th>
-        <th style="text-align:right">Receipt (B)</th>
-        <th style="text-align:right">Sales by Meter (D)</th>
-        <th style="text-align:right">Pump Test (E)</th>
-        <th style="text-align:right">Net Sales (F=D-E)</th>
-        <th style="text-align:right">Closing Stock (G=C-F)</th>
-        <th style="text-align:right">Dip (cm)</th>
-        <th style="text-align:right">Dip Stock (H)</th>
-        <th style="text-align:right">Water Dip (cm)</th>
-        <th style="text-align:right">Variation (H-G)</th>
-        <th style="text-align:left">Lorry / Invoice</th>
-      </thead>
-      <tbody>${rspRows||'<tr><td colspan="13" style="text-align:center;color:#888;padding:6px">No product data</td></tr>'}</tbody>
-    </table>
-    <p style="font-size:9px;color:#b91c1c;margin:2px 0">⚠ Variation &gt;0.5% of throughput must be reported to OMC Territory Officer immediately (MDG Clause 7.4)</p>
-
-    <!-- Section 2: Nozzle-wise Meter Readings -->
-    <div style="font-weight:bold;background:#1e3a5f;color:#fff;padding:4px 6px;margin-top:8px;font-size:11px">
-      SECTION B — NOZZLE-WISE METER READINGS &amp; SALES
-    </div>
-    <table style="width:100%;border-collapse:collapse;font-size:11px">
-      <thead><tr style="background:#e8f0fe">
-        <th style="padding:4px 5px">#</th><th>Nozzle</th><th>Attendant</th>
-        <th style="text-align:right">Opening (L)</th><th style="text-align:right">Closing (L)</th>
-        <th style="text-align:right">Test (L)</th><th style="text-align:right">Net Sale (L)</th>
-        <th style="text-align:right">Amount (₹)</th>
-      </tr></thead>
-      <tbody>${nozzleRows||'<tr><td colspan="9" style="text-align:center;padding:12px;color:#888">No settled sessions for this date</td></tr>'}</tbody>
-      <tfoot><tr style="background:#e8f0fe;font-weight:bold;border-top:2px solid #1e3a5f">
-        <td colspan="7" style="padding:4px 5px;text-align:right">GRAND TOTAL</td>
-        <td style="text-align:right">${fmt.num(totalLitres100/100)} L</td>
-        <td style="text-align:right">₹${fmt.num(Money.fromPaise(totalAmtPaise))}</td>
-      </tfoot>
-    </table>
-
-    <!-- Section 3: Collections -->
-    <div style="font-weight:bold;background:#1e3a5f;color:#fff;padding:4px 6px;margin-top:8px;font-size:11px">
-      SECTION C — COLLECTION SUMMARY
-    </div>
-    <table style="width:100%;border-collapse:collapse;font-size:11px">
-      <thead><tr style="background:#e8f0fe">
-        <th style="padding:4px 5px">Cash (₹)</th><th>Card/Swipe (₹)</th><th>UPI (₹)</th>
-        <th>Credit (₹)</th><th>Discount (₹)</th><th>Net Collected (₹)</th>
-      </tr></thead>
-      <tbody><tr>
-        <td style="text-align:right;padding:4px 5px">₹${fmt.num(collSummary.cash)}</td>
-        <td style="text-align:right">₹${fmt.num(collSummary.card)}</td>
-        <td style="text-align:right">₹${fmt.num(collSummary.upi)}</td>
-        <td style="text-align:right">₹${fmt.num(collSummary.credit)}</td>
-        <td style="text-align:right">₹${fmt.num(collSummary.discount)}</td>
-        <td style="text-align:right;font-weight:700">₹${fmt.num(Money.fromPaise(totalAmtPaise)-collSummary.discount)}</td>
-      </tr></tbody>
-    </table>
-
-    <!-- Signature blocks -->
-    <div style="margin-top:20px;display:flex;justify-content:space-between">
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:110px;margin:28px auto 0"></div><div style="font-size:9px">Pump Attendant</div></div>
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:110px;margin:28px auto 0"></div><div style="font-size:9px">Supervisor</div></div>
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:110px;margin:28px auto 0"></div><div style="font-size:9px">Dealer / Manager</div></div>
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:110px;margin:28px auto 0"></div><div style="font-size:9px">OMC Sales Officer</div></div>
-    </div>
-    <p style="font-size:9px;color:#666;margin-top:8px;text-align:center">This report is generated by NexBunk. Must be retained for minimum 3 years as per MDG / HC&amp;I guidelines.</p>`;
-  _showComplianceReport(html);
-}
-async function generateDipRegister(){
-  const settings=APP.settings||{};
-  const monthStr=document.getElementById('dip-month')?.value||fmt.today().slice(0,7);
-  const [y,m]=monthStr.split('-').map(Number);
-  const days=new Date(y,m,0).getDate();
-  const from=`${monthStr}-01`;const to=`${monthStr}-${String(days).padStart(2,'0')}`;
-
-  const dipsAll=DB.listKeys('pbms_dip_').map(k=>DB.get(k)).filter(Boolean);
-  const settingsProducts=(settings.products||[]).filter(p=>p.active!==false).map(p=>({id:p.id||p.name,name:p.name||p.id}));
-  const dipProducts=[...new Set(dipsAll.flatMap(d=>(d.entries||[]).map(e=>e.product)))];
-  const allProducts=[...new Map([...settingsProducts,...dipProducts.map(id=>({id,name:id}))].map(p=>[p.id,p])).values()];
-
-  // Build the same cache shape the Stock Ledger tab uses, extended 3 months back so
-  // opening/carry-forward figures are accurate across the month boundary.
-  const extFrom=(()=>{const d=new Date(from);d.setMonth(d.getMonth()-3);return d.toISOString().split('T')[0];})();
-  const cache={purchases:{},dips:{},dipMeta:{},sales:{},tests:{},openings:{}};
-  for(const p of allProducts){const o=DB.get(`pbms_opening_stock_${p.id}`);if(o)cache.openings[p.id]=o;}
-  const purKeys=DB.listActive('pbms_purchase_');
-  for(const p of purKeys){if(!p||p.date<extFrom||p.date>to)continue;
-    const key=`${p.date}_${p.product}`;cache.purchases[key]=(cache.purchases[key]||0)+(p.quantity||0);}
-  for(const d of dipsAll){if(!d||!d.date||d.date>to)continue;
-    for(const e of(d.entries||[])){
-      if(e.physicalStock!=null)cache.dips[`${d.date}_${e.product}`]=e.physicalStock;
-      cache.dipMeta[`${d.date}_${e.product}`]={dipCm:e.dipCm??null,waterDip:e.waterDip??null,remarks:e.remarks||''};
-    }}
-  const sessKeys=DB.listKeys('pbms_session_');
-  for(const k of sessKeys){const s=DB.get(k);if(!s||s.status!=='Settled'||s.checkInDate<from||s.checkInDate>to)continue;
-    for(const n of(s.assignedNozzles||[])){const key=`${s.checkInDate}_${n.product}`;
-      cache.sales[key]=(cache.sales[key]||0)+(n.netSale||0);
-      cache.tests[key]=(cache.tests[key]||0)+(n.testLitres||0);
-    }}
-  const rows=computeAllSpRows(from,to,allProducts,cache);
-
-  // Build one table per product/tank (TNPCB format), mirroring the Stock Ledger column set
-  const productTables=allProducts.map(prod=>{
-    const bodyRows=rows.map((row,idx)=>{
-      const d=row.products[prod.id]||{};
-      const dayNum=idx+1;
-      const variationPct=d.closingStock>0&&d.variation!=null?(d.variation/d.closingStock*100):null;
-      const variationFlag=variationPct!=null&&Math.abs(variationPct)>0.5;
-      const varColor=variationFlag?'#b91c1c':d.variation>0?'#15803d':d.variation<0?'#b91c1c':'#999';
-      return `<tr style="${dayNum%2?'':'background:#f9fafb'}">
-        <td style="padding:2px 4px;text-align:center;font-size:9px">${dayNum}</td>
-        <td style="font-size:9px">${fmt.date(row.date)}</td>
-        <td style="text-align:right;font-size:9px">${fmt.num(d.openingStock||0)}</td>
-        <td style="text-align:right;font-size:9px;color:${d.receipt>0?'#15803d':'#999'}">${d.receipt>0?'+'+fmt.num(d.receipt):'—'}</td>
-        <td style="text-align:right;font-size:9px">${fmt.num(d.totalStock||0)}</td>
-        <td style="text-align:right;font-size:9px">${fmt.num(d.salesByMeter||0)}</td>
-        <td style="text-align:right;font-size:9px">${d.pumpTest>0?fmt.num(d.pumpTest):'—'}</td>
-        <td style="text-align:right;font-size:9px;font-weight:600">${fmt.num(d.netSales||0)}</td>
-        <td style="text-align:right;font-size:9px;color:#666">${fmt.num(d.cumSale||0)}</td>
-        <td style="text-align:right;font-size:9px;font-weight:600">${fmt.num(d.closingStock||0)}</td>
-        <td style="text-align:right;font-size:9px">${d.dipCm!=null?fmt.num(d.dipCm):'—'}</td>
-        <td style="text-align:right;font-size:9px">${d.dip!=null?fmt.num(d.dip):'—'}</td>
-        <td style="text-align:right;font-size:9px;font-weight:${variationFlag?700:400};color:${varColor}">
-          ${d.variation!=null?(d.variation>0?'+':'')+fmt.num(d.variation):'—'}${variationPct!=null?' ('+Math.abs(variationPct).toFixed(2)+'%)':''}${variationFlag?' ⚠':''}
-        </td>
-        <td style="text-align:right;font-size:9px;color:${d.cumVariation<0?'#b91c1c':d.cumVariation>0?'#15803d':'#999'}">${(d.cumVariation>0?'+':'')+fmt.num(d.cumVariation||0)}</td>
-        <td style="text-align:right;font-size:9px;color:${d.waterDip?'#b45309':'#999'}">${d.waterDip!=null?fmt.num(d.waterDip):'—'}</td>
-        <td style="font-size:9px">${d.remarks||''}</td>
-        <td style="font-size:9px">&nbsp;</td>
-      </tr>`;
-    }).join('');
-    const totalReceipt=rows.reduce((s,r)=>s+(r.products[prod.id]?.receipt||0),0);
-    const totalMeter=rows.reduce((s,r)=>s+(r.products[prod.id]?.salesByMeter||0),0);
-    const totalTest=rows.reduce((s,r)=>s+(r.products[prod.id]?.pumpTest||0),0);
-    const totalNet=rows.reduce((s,r)=>s+(r.products[prod.id]?.netSales||0),0);
-    const totalVar=rows.reduce((s,r)=>{const v=r.products[prod.id]?.variation;return v!=null?s+v:s;},0);
-    return `
-      <div style="margin-bottom:14px;page-break-inside:avoid">
-        <div style="font-weight:bold;background:#1e3a5f;color:#fff;padding:4px 6px;font-size:11px">
-          PRODUCT: ${prod.name} &nbsp;|&nbsp; Tank ID: ${(settings.products||[]).find(p=>(p.id||p.name)===prod.id)?.tankId||'—'}
-        </div>
-        <table style="width:100%;border-collapse:collapse;font-size:10px">
-          <thead>
-            <tr style="background:#e8f0fe">
-              <th style="padding:3px 4px">Day</th><th>Date</th>
-              <th style="text-align:right">Opening<br>Stock (A)</th>
-              <th style="text-align:right">Receipt<br>(B)</th>
-              <th style="text-align:right">Total Stock<br>(C=A+B)</th>
-              <th style="text-align:right">Sales by<br>Meter (D)</th>
-              <th style="text-align:right">Pump<br>Test (E)</th>
-              <th style="text-align:right">Net Sales<br>(F=D-E)</th>
-              <th style="text-align:right">Cum.<br>Sales</th>
-              <th style="text-align:right">Closing<br>Stock (G=C-F)</th>
-              <th style="text-align:right">Dip<br>(cm)</th>
-              <th style="text-align:right">Dip Stock<br>(H)</th>
-              <th style="text-align:right">Variation<br>(H-G)</th>
-              <th style="text-align:right">Cum.<br>Variation</th>
-              <th style="text-align:right">Water<br>Dip (cm)</th>
-              <th>Remarks</th><th>Initials</th>
-            </tr>
-          </thead>
-          <tbody>${bodyRows}</tbody>
-          <tfoot>
-            <tr style="background:#f1f5f9;font-weight:700;border-top:2px solid #1e3a5f">
-              <td colspan="3" style="padding:3px 4px;text-align:right">TOTAL</td>
-              <td style="text-align:right">${totalReceipt>0?fmt.num(totalReceipt):'—'}</td>
-              <td>&nbsp;</td>
-              <td style="text-align:right">${fmt.num(totalMeter)}</td>
-              <td style="text-align:right">${totalTest>0?fmt.num(totalTest):'—'}</td>
-              <td style="text-align:right">${fmt.num(totalNet)}</td>
-              <td colspan="2">&nbsp;</td>
-              <td colspan="2">&nbsp;</td>
-              <td style="text-align:right;color:${totalVar<0?'#b91c1c':totalVar>0?'#15803d':'#000'}">${(totalVar>0?'+':'')+fmt.num(totalVar)}</td>
-              <td colspan="3">&nbsp;</td>
-            </tr>
-          </tfoot>
-        </table>
-        <p style="font-size:9px;color:#b91c1c;margin:2px 0">⚠ Variation &gt;0.5% of closing stock must be reported to OMC Territory Officer (MDG Clause 7.4 / TNPCB Rule 12)</p>
-      </div>`;
-  }).join('');
-
-  const html=`
-    ${_complianceHeader(settings,'DIP MEASUREMENT REGISTER','HPCL / TNPCB Format — MDG Clause 7.3 | Monthly Submission Required',`Month: ${monthStr} | Generated: ${fmt.today()}`)}
-    <p style="font-size:10px;color:#555;margin:4px 0 8px">
-      Station: <strong>${settings.stationName||''}</strong> | Dealer: <strong>${settings.dealerName||''}</strong> |
-      Lic No.: <strong>${settings.licenseNo||'—'}</strong> | OMC: <strong>${settings.oilCompany||'—'}</strong>
-    </p>
-    <p style="font-size:9px;color:#666;background:#fffbeb;border:1px solid #fcd34d;padding:4px 6px;border-radius:4px;margin-bottom:8px">
-      📌 Dip readings must be taken at 6:00 AM and 10:00 PM daily. Water dip must be checked weekly minimum.
-      All entries to be countersigned by Supervisor. Density to be recorded from delivery note or in-house densitometer.
-    </p>
-    ${allProducts.length?productTables:'<p style="text-align:center;color:#888;padding:20px">No dip data entered for this month. Enter readings under Dip Measurements tab daily.</p>'}
-    <div style="margin-top:20px;display:flex;justify-content:space-between">
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:130px;margin:24px auto 0"></div><div style="font-size:9px">Surveyor / Supervisor</div></div>
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:130px;margin:24px auto 0"></div><div style="font-size:9px">Dealer Signature &amp; Stamp</div></div>
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:130px;margin:24px auto 0"></div><div style="font-size:9px">OMC Territory Officer</div></div>
-    </div>
-    <p style="font-size:9px;color:#666;text-align:center;margin-top:8px">Retain for 3 years | TNPCB / HPCL inspection on demand</p>`;
-  _showComplianceReport(html);
-}
-async function generateMonthlyStockAccount(){
-  const settings=APP.settings||{};
-  const monthStr=document.getElementById('msa-month')?.value||fmt.today().slice(0,7);
-  const [y,m]=monthStr.split('-').map(Number);
-  const sessions=await getSalesForMonth(y,m);
-  const purchases=DB.listActive('pbms_purchase_').filter(p=>p&&p.date&&p.date.startsWith(monthStr));
-
-  // Product id→name map
-  const prodMap={};
-  (settings.products||[]).forEach(p=>{prodMap[p.id||p.name]=p.name||p.id;});
-
-  const productIds=[...new Set([
-    ...sessions.flatMap(d=>Object.keys(d.byProduct||{})),
-    ...purchases.map(p=>p.product)
-  ])].filter(Boolean);
-
-  // Opening/closing from dip
-  const firstDay=`${monthStr}-01`;
-  const lastDay=`${monthStr}-${String(new Date(y,m,0).getDate()).padStart(2,'0')}`;
-  const dipFirst=DB.get(`pbms_dip_${firstDay}`);
-  const dipLast=DB.get(`pbms_dip_${lastDay}`);
-
-  // Receipt breakup rows
-  const receiptRows=purchases.sort((a,b)=>(a.date||'').localeCompare(b.date||'')).map(p=>`<tr>
-    <td style="padding:2px 5px;font-size:10px">${p.date||'—'}</td>
-    <td style="font-size:10px">${prodMap[p.product]||p.product||'—'}</td>
-    <td style="font-size:10px">${p.lorryNo||p.vehicleNo||'—'}</td>
-    <td style="font-size:10px">${p.invoiceNo||p.billNo||'—'}</td>
-    <td style="text-align:right;font-size:10px">${fmt.num(p.quantity||0)} L</td>
-    <td style="text-align:right;font-size:10px">${p.density||'—'}</td>
-    <td style="text-align:right;font-size:10px">₹${fmt.num(p.rate||0)}/L</td>
-  </tr>`).join('');
-
-  // Product summary with MDG variance check
-  const ALLOWABLE_PCT=0.5; // MDG Clause 7.4
-  const productRows=productIds.map(prodId=>{
-    const prodName=prodMap[prodId]||prodId;
-    const totalSalesLtrs=sessions.reduce((a,d)=>a+(d.byProduct?.[prodId]||0),0);
-    const receiptsLtrs=purchases.filter(p=>p.product===prodId).reduce((a,p)=>a+(p.quantity||0),0);
-    const opening=(dipFirst?.entries||[]).find(e=>e.product===prodId)?.physicalStock;
-    const closing=(dipLast?.entries||[]).find(e=>e.product===prodId)?.physicalStock;
-    const bookClose=opening!=null?opening+receiptsLtrs-totalSalesLtrs:null;
-    const variance=bookClose!=null&&closing!=null?closing-bookClose:null;
-    const variancePct=bookClose!=null&&bookClose>0&&variance!=null?(variance/bookClose*100):null;
-    const allowable=bookClose!=null?bookClose*(ALLOWABLE_PCT/100):null;
-    const flag=variancePct!=null&&Math.abs(variancePct)>ALLOWABLE_PCT;
-    const gain=variance!=null&&variance>0?variance:0;
-    const loss=variance!=null&&variance<0?Math.abs(variance):0;
-    return `<tr style="${flag?'background:#fff5f5':''}">
-      <td style="padding:4px 6px;font-weight:600">${prodName}</td>
-      <td style="text-align:right">${opening!=null?fmt.num(opening)+' L':'—'}</td>
-      <td style="text-align:right;color:#15803d">${fmt.num(receiptsLtrs)} L</td>
-      <td style="text-align:right;font-weight:600">${fmt.num(totalSalesLtrs)} L</td>
-      <td style="text-align:right">${bookClose!=null?fmt.num(bookClose)+' L':'—'}</td>
-      <td style="text-align:right">${closing!=null?fmt.num(closing)+' L':'—'}</td>
-      <td style="text-align:right;color:#15803d">${gain>0?'+'+fmt.num(gain)+' L':'—'}</td>
-      <td style="text-align:right;color:#b91c1c">${loss>0?fmt.num(loss)+' L':'—'}</td>
-      <td style="text-align:right;font-weight:700;color:${flag?'#b91c1c':'#374151'}">
-        ${variancePct!=null?Math.abs(variancePct).toFixed(2)+'%':'—'}
-      </td>
-      <td style="text-align:center;font-weight:700;color:${flag?'#b91c1c':'#15803d'}">
-        ${variancePct!=null?(flag?'FAIL ⚠':'PASS ✓'):'—'}
-      </td>
-      <td style="text-align:right;font-size:10px;color:#666">${allowable!=null?'±'+fmt.num(allowable)+' L':'—'}</td>
-    </tr>`;
-  }).join('');
-
-  const html=`
-    ${_complianceHeader(settings,'MONTHLY STOCK ACCOUNT','HPCL OMC Format-2 | MDG Clause 7.3 — Submit by 5th of following month',`Month: ${monthStr} | Generated: ${fmt.today()}`)}
-
-    <!-- Section A: Product Stock Summary -->
-    <div style="font-weight:bold;background:#1e3a5f;color:#fff;padding:4px 6px;margin-top:4px;font-size:11px">
-      SECTION A — MONTHLY PRODUCT STOCK RECONCILIATION
-    </div>
-    <table style="width:100%;border-collapse:collapse;font-size:11px">
-      <thead><tr style="background:#e8f0fe">
-        <th style="padding:4px 5px;text-align:left">Product</th>
-        <th style="text-align:right">Opening Stock</th><th style="text-align:right">Receipts</th>
-        <th style="text-align:right">Meter Sales</th><th style="text-align:right">Book Closing</th>
-        <th style="text-align:right">Dip Closing</th>
-        <th style="text-align:right">Gain (+)</th><th style="text-align:right">Loss (−)</th>
-        <th style="text-align:right">Variation %</th><th style="text-align:center">MDG Status</th>
-        <th style="text-align:right">Allowable (±0.5%)</th>
-      </tr></thead>
-      <tbody>${productRows||'<tr><td colspan="11" style="text-align:center;color:#888;padding:8px">No data for this month</td></tr>'}</tbody>
-    </table>
-    <p style="font-size:9px;color:#b91c1c;margin:3px 0">⚠ FAIL status (variation &gt;0.5%) must be reported to OMC Territory Officer with written explanation. MDG Clause 7.4.</p>
-
-    <!-- Section B: Receipt Register -->
-    <div style="font-weight:bold;background:#1e3a5f;color:#fff;padding:4px 6px;margin-top:10px;font-size:11px">
-      SECTION B — PRODUCT RECEIPT REGISTER (Tank Lorry / Pipeline)
-    </div>
-    <table style="width:100%;border-collapse:collapse;font-size:11px">
-      <thead><tr style="background:#e8f0fe">
-        <th style="padding:4px 5px">Date</th><th>Product</th><th>Lorry No.</th>
-        <th>Invoice No.</th><th style="text-align:right">Qty (L)</th>
-        <th style="text-align:right">Density</th><th style="text-align:right">Rate</th>
-      </tr></thead>
-      <tbody>${receiptRows||'<tr><td colspan="7" style="text-align:center;color:#888;padding:8px">No receipts recorded for this month</td></tr>'}</tbody>
-    </table>
-
-    <!-- Certification -->
-    <div style="margin-top:16px;border:1px solid #ccc;padding:8px;font-size:10px;background:#f9fafb">
-      <strong>Dealer's Declaration:</strong> I hereby certify that the stock account for the month of ${monthStr} as shown above is true and correct to the best of my knowledge.
-      All variations have been duly explained. Records available for OMC / TNPCB inspection on demand.
-    </div>
-    <div style="margin-top:20px;display:flex;justify-content:space-between">
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:130px;margin:24px auto 0"></div><div style="font-size:9px">Accountant</div></div>
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:130px;margin:24px auto 0"></div><div style="font-size:9px">Dealer / Manager &amp; Stamp</div></div>
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:130px;margin:24px auto 0"></div><div style="font-size:9px">OMC Territory Inspector</div></div>
-    </div>
-    <p style="font-size:9px;color:#666;text-align:center;margin-top:8px">Retain for 3 years | Submit to OMC by 5th of following month</p>`;
-  _showComplianceReport(html);
-}
-async function generateSERegister(){
-  const settings=APP.settings||{};
-  const monthStr=document.getElementById('se-month')?.value||fmt.today().slice(0,7);
-  const [y,m]=monthStr.split('-').map(Number);
-  const rows=await dbRangeQuery('sessions','checkInDate',`${monthStr}-01`,`${monthStr}-${String(new Date(y,m,0).getDate()).padStart(2,'0')}`);
-  const settled=rows.map(r=>r.data||r).filter(s=>s.status==='Settled').sort((a,b)=>a.checkInDate.localeCompare(b.checkInDate));
-  // Staff name lookup
-  const staffMap={};
-  DB.listKeys('pbms_staff_').forEach(k=>{const s=DB.get(k);if(s&&s.id)staffMap[s.id]=s.name||s.id;});
-  // Product rate lookup for litre-equivalent SE calculation
-  const rateMap={};
-  (settings.products||[]).forEach(p=>{rateMap[p.id||p.name]=p.rate||0;});
-
-  let runningPaise=0;
-  let runningLitres=0;
-  const tableRows=settled.map((s,i)=>{
-    const sePaise=s.shortageExcessPaise!=null?s.shortageExcessPaise:Money.toPaise(s.shortageExcess||0);
-    runningPaise+=sePaise;
-    const calcSalesPaise=s.calcSalesPaise!=null?s.calcSalesPaise:Money.toPaise(s.calcSales||0);
-    const c=s.collections||{};
-    const collPaise=c.cashPaise!=null
-      ?Money.add(c.cashPaise,c.cardPaise,c.upiPaise,c.creditPaise)
-      :Money.toPaise((c.cashAmt||0)+(c.cardAmt||0)+(c.upiAmt||0)+(c.creditAmt||0));
-    // Litre-equivalent shortage/excess: S/E₹ ÷ weighted average rate
-    const totalLtrs=(s.assignedNozzles||[]).reduce((a,n)=>a+(n.netSale||0),0);
-    const weightedRate=totalLtrs>0?Money.fromPaise(calcSalesPaise)/totalLtrs:0;
-    const seLitres=weightedRate>0?Money.fromPaise(sePaise)/weightedRate:0;
-    runningLitres+=seLitres;
-    const flag=Math.abs(Money.fromPaise(sePaise))>0&&totalLtrs>0&&Math.abs(seLitres/totalLtrs)>0.005;
-    const empName=staffMap[s.employeeId]||s.employeeId||'-';
-    return `<tr style="${flag?'background:#fff5f5':(i%2?'background:#f9fafb':'')}">
-      <td style="padding:3px 5px;text-align:center;font-size:10px">${i+1}</td>
-      <td style="font-size:10px">${s.checkInDate}</td>
-      <td style="font-size:10px">${empName}</td>
-      <td style="text-align:right;font-size:10px">${fmt.num(totalLtrs)} L</td>
-      <td style="text-align:right;font-size:10px">₹${fmt.num(Money.fromPaise(calcSalesPaise))}</td>
-      <td style="text-align:right;font-size:10px">₹${fmt.num(Money.fromPaise(collPaise))}</td>
-      <td style="text-align:right;font-weight:600;font-size:10px;color:${sePaise<0?'#b91c1c':'#15803d'}">₹${fmt.num(Money.fromPaise(sePaise))}</td>
-      <td style="text-align:right;font-size:10px;color:${sePaise<0?'#b91c1c':'#15803d'}">${fmt.num(Math.abs(seLitres))} L ${seLitres<0?'(Sh)':seLitres>0?'(Ex)':''}</td>
-      <td style="text-align:right;font-size:10px;font-weight:600;color:${runningPaise<0?'#b91c1c':'#15803d'}">₹${fmt.num(Money.fromPaise(runningPaise))}</td>
-      <td style="font-size:9px;color:#666">${s.seReason||flag?'<span style="color:#b91c1c">Requires reason</span>':''}</td>
-    </tr>`;
-  }).join('');
-
-  const totalSePaise=settled.reduce((a,s)=>a+(s.shortageExcessPaise!=null?s.shortageExcessPaise:Money.toPaise(s.shortageExcess||0)),0);
-  const html=`
-    ${_complianceHeader(settings,'SHORTAGE / EXCESS REGISTER','HPCL Internal Audit Format | MDG Clause 8.2',`Month: ${monthStr} | Generated: ${fmt.today()}`)}
-    <p style="font-size:9px;color:#666;background:#fffbeb;border:1px solid #fcd34d;padding:4px 6px;border-radius:4px;margin-bottom:6px">
-      📌 Any shift shortage &gt;0.5% of throughput must be entered with a reason and countersigned by Manager.
-      Cumulative monthly shortage &gt;0.5% of total throughput to be reported to OMC Territory Officer.
-    </p>
-    <table style="width:100%;border-collapse:collapse;font-size:11px">
-      <thead><tr style="background:#1e3a5f;color:#fff">
-        <th style="padding:4px 5px">#</th><th>Date</th><th>Employee</th>
-        <th style="text-align:right">Sales (L)</th>
-        <th style="text-align:right">Calc Sales (₹)</th><th style="text-align:right">Collections (₹)</th>
-        <th style="text-align:right">S/E (₹)</th><th style="text-align:right">S/E (L)</th>
-        <th style="text-align:right">Running Bal (₹)</th><th>Reason</th>
-      </tr></thead>
-      <tbody>${tableRows||'<tr><td colspan="10" style="text-align:center;padding:12px;color:#888">No settled sessions for this month</td></tr>'}</tbody>
-      <tfoot><tr style="background:#e8f0fe;font-weight:bold;border-top:2px solid #1e3a5f">
-        <td colspan="6" style="padding:4px 5px;text-align:right">Monthly Closing Balance</td>
-        <td colspan="3" style="text-align:right;color:${totalSePaise<0?'#b91c1c':'#15803d'}">₹${fmt.num(Money.fromPaise(totalSePaise))}</td>
-        <td></td>
-      </tfoot>
-    </table>
-    <div style="margin-top:20px;display:flex;justify-content:space-between">
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:130px;margin:24px auto 0"></div><div style="font-size:9px">Accountant</div></div>
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:130px;margin:24px auto 0"></div><div style="font-size:9px">Dealer / Manager</div></div>
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:130px;margin:24px auto 0"></div><div style="font-size:9px">OMC Sales Officer</div></div>
-    </div>`;
-  _showComplianceReport(html);
-}
-async function generateCreditRegister(){
-  const settings=APP.settings||{};
-  const monthStr=document.getElementById('cr-month')?.value||fmt.today().slice(0,7);
-  const allCredits=DB.listActive('pbms_credit_sale_').filter(c=>c.customerId);
-  const allPayments=DB.listActive('pbms_payment_').filter(p=>p.customerId);
-  // Customer master data
-  const custMap={};
-  DB.listActive('pbms_customer_').forEach(c=>{if(c&&c.id)custMap[c.id]=c;});
-
-  // This-month transaction detail rows
-  const monthCredits=allCredits.filter(c=>c.date&&c.date.startsWith(monthStr))
-    .sort((a,b)=>(a.date||'').localeCompare(b.date||''));
-  const monthPayments=allPayments.filter(p=>p.date&&p.date.startsWith(monthStr))
-    .sort((a,b)=>(a.date||'').localeCompare(b.date||''));
-
-  // Detail transaction rows
-  const txnRows=monthCredits.map(c=>{
-    const cust=custMap[c.customerId]||{};
-    const today=new Date();
-    const txDate=new Date(c.date||today);
-    const daysOut=Math.floor((today-txDate)/(1000*60*60*24));
-    const overdue=daysOut>30;
-    return `<tr style="${overdue?'background:#fff5f5':''}">
-      <td style="padding:2px 5px;font-size:10px">${c.date||'—'}</td>
-      <td style="font-size:10px;font-weight:600">${cust.name||c.customerName||c.customerId}</td>
-      <td style="font-size:10px">${c.vehicleNo||c.vehicle||cust.vehicleNo||'—'}</td>
-      <td style="font-size:10px">${c.product||'—'}</td>
-      <td style="text-align:right;font-size:10px">${c.litres!=null?fmt.num(c.litres)+' L':c.quantity!=null?fmt.num(c.quantity)+' L':'—'}</td>
-      <td style="text-align:right;font-size:10px;font-weight:600">₹${fmt.num(c.amount||0)}</td>
-      <td style="text-align:right;font-size:10px;color:${overdue?'#b91c1c':'#374151'}">${daysOut}d ${overdue?'⚠ OVERDUE':''}</td>
-    </tr>`;
-  }).join('');
-
-  const paymentRows=monthPayments.map(p=>{
-    const cust=custMap[p.customerId]||{};
-    return `<tr>
-      <td style="padding:2px 5px;font-size:10px">${p.date||'—'}</td>
-      <td style="font-size:10px;font-weight:600">${cust.name||p.customerName||p.customerId}</td>
-      <td style="text-align:right;font-size:10px;color:#15803d;font-weight:600">₹${fmt.num(p.amount||0)}</td>
-      <td style="font-size:10px">${p.mode||p.paymentMode||'—'}</td>
-      <td style="font-size:10px">${p.refNo||p.reference||'—'}</td>
-    </tr>`;
-  }).join('');
-
-  // Customer summary with outstanding + credit limit + overdue flag
-  const byCustomer={};
-  allCredits.forEach(c=>{
-    const cid=c.customerId;if(!byCustomer[cid])byCustomer[cid]={cust:custMap[cid]||{},monthSalePaise:0,totalSalePaise:0,totalPaidPaise:0,latestTxDate:null};
-    byCustomer[cid].totalSalePaise+=Money.toPaise(c.amount||0);
-    if(c.date&&c.date.startsWith(monthStr))byCustomer[cid].monthSalePaise+=Money.toPaise(c.amount||0);
-    if(!byCustomer[cid].latestTxDate||c.date>byCustomer[cid].latestTxDate)byCustomer[cid].latestTxDate=c.date;
-  });
-  allPayments.forEach(p=>{
-    const cid=p.customerId;if(!byCustomer[cid])byCustomer[cid]={cust:custMap[cid]||{},monthSalePaise:0,totalSalePaise:0,totalPaidPaise:0,latestTxDate:null};
-    byCustomer[cid].totalPaidPaise+=Money.toPaise(p.amount||0);
-  });
-
-  const summaryRows=Object.entries(byCustomer).map(([cid,d])=>{
-    const outPaise=Money.sub(d.totalSalePaise,d.totalPaidPaise);
-    const creditLimit=d.cust.creditLimit;
-    const today=new Date();
-    const latestDate=d.latestTxDate?new Date(d.latestTxDate):null;
-    const daysOut=latestDate?Math.floor((today-latestDate)/(1000*60*60*24)):null;
-    const overdue=daysOut!=null&&daysOut>30&&outPaise>0;
-    const overLimit=creditLimit!=null&&Money.fromPaise(outPaise)>creditLimit;
-    return `<tr style="${(overdue||overLimit)?'background:#fff5f5':''}">
-      <td style="padding:3px 6px;font-weight:600;font-size:10px">${d.cust.name||cid}</td>
-      <td style="font-size:10px">${d.cust.vehicleNo||'—'}</td>
-      <td style="text-align:right;font-size:10px">₹${fmt.num(Money.fromPaise(d.monthSalePaise))}</td>
-      <td style="text-align:right;font-size:10px">₹${fmt.num(Money.fromPaise(d.totalSalePaise))}</td>
-      <td style="text-align:right;font-size:10px">₹${fmt.num(Money.fromPaise(d.totalPaidPaise))}</td>
-      <td style="text-align:right;font-weight:700;font-size:10px;color:${outPaise>0?'#b91c1c':'#15803d'}">₹${fmt.num(Money.fromPaise(outPaise))}</td>
-      <td style="text-align:right;font-size:10px">${creditLimit!=null?'₹'+fmt.num(creditLimit):'—'}</td>
-      <td style="text-align:center;font-size:10px;font-weight:700;color:${overLimit?'#b91c1c':'#374151'}">${overLimit?'OVER LIMIT ⚠':creditLimit!=null?'OK':'—'}</td>
-      <td style="text-align:right;font-size:10px;color:${overdue?'#b91c1c':'#374151'}">${daysOut!=null?daysOut+'d':''} ${overdue?'⚠':''}</td>
-    </tr>`;
-  }).join('');
-
-  // Total Outstanding must only sum customers who actually owe money.
-  // Netting every customer's position together (including customers sitting
-  // in advance, who have a negative outPaise) can hide real, escalation-worthy
-  // debt behind another customer's advance — a serious risk on a compliance
-  // register that explicitly instructs escalation for overdue/over-limit accounts.
-  const totalOutPaise=Object.values(byCustomer).reduce((a,d)=>{
-    const netPaise=Money.sub(d.totalSalePaise,d.totalPaidPaise);
-    return a+(netPaise>0?netPaise:0);
-  },0);
-  const totalAdvancePaise=Object.values(byCustomer).reduce((a,d)=>{
-    const netPaise=Money.sub(d.totalSalePaise,d.totalPaidPaise);
-    return a+(netPaise<0?-netPaise:0);
-  },0);
-  const html=`
-    ${_complianceHeader(settings,'CREDIT SALES REGISTER','HPCL OMC Format | MDG Clause 9 — Credit Control',`Period: ${monthStr} | Generated: ${fmt.today()}`)}
-
-    <div style="font-weight:bold;background:#1e3a5f;color:#fff;padding:4px 6px;margin-top:4px;font-size:11px">
-      SECTION A — THIS MONTH CREDIT SALES (${monthStr})
-    </div>
-    <table style="width:100%;border-collapse:collapse;font-size:11px">
-      <thead><tr style="background:#e8f0fe">
-        <th style="padding:4px 5px">Date</th><th>Customer</th><th>Vehicle No.</th>
-        <th>Product</th><th style="text-align:right">Qty (L)</th>
-        <th style="text-align:right">Amount (₹)</th><th style="text-align:right">Days Out</th>
-      </tr></thead>
-      <tbody>${txnRows||'<tr><td colspan="7" style="text-align:center;color:#888;padding:6px">No credit sales this month</td></tr>'}</tbody>
-    </table>
-
-    <div style="font-weight:bold;background:#1e3a5f;color:#fff;padding:4px 6px;margin-top:8px;font-size:11px">
-      SECTION B — THIS MONTH PAYMENTS RECEIVED
-    </div>
-    <table style="width:100%;border-collapse:collapse;font-size:11px">
-      <thead><tr style="background:#e8f0fe">
-        <th style="padding:4px 5px">Date</th><th>Customer</th>
-        <th style="text-align:right">Amount (₹)</th><th>Mode</th><th>Reference No.</th>
-      </tr></thead>
-      <tbody>${paymentRows||'<tr><td colspan="5" style="text-align:center;color:#888;padding:6px">No payments this month</td></tr>'}</tbody>
-    </table>
-
-    <div style="font-weight:bold;background:#1e3a5f;color:#fff;padding:4px 6px;margin-top:8px;font-size:11px">
-      SECTION C — CUSTOMER-WISE OUTSTANDING SUMMARY (All Time)
-    </div>
-    <table style="width:100%;border-collapse:collapse;font-size:11px">
-      <thead><tr style="background:#e8f0fe">
-        <th style="padding:4px 5px">Customer</th><th>Vehicle</th>
-        <th style="text-align:right">Month Credit</th><th style="text-align:right">Total Credit</th>
-        <th style="text-align:right">Total Paid</th><th style="text-align:right">Outstanding</th>
-        <th style="text-align:right">Credit Limit</th><th style="text-align:center">Limit Status</th>
-        <th style="text-align:right">Overdue</th>
-      </tr></thead>
-      <tbody>${summaryRows||'<tr><td colspan="9" style="text-align:center;color:#888;padding:6px">No credit customers</td></tr>'}</tbody>
-      <tfoot><tr style="background:#e8f0fe;font-weight:bold;border-top:2px solid #1e3a5f">
-        <td colspan="5" style="padding:4px 5px;text-align:right">Total Outstanding</td>
-        <td style="text-align:right;color:${totalOutPaise>0?'#b91c1c':'#15803d'}">₹${fmt.num(Money.fromPaise(totalOutPaise))}</td>
-        <td colspan="3"></td>
-      </tr>
-      <tr style="background:#e8f0fe;font-weight:600;font-size:10px">
-        <td colspan="5" style="padding:2px 5px;text-align:right;color:#374151">Total Advance Held (offsets nothing above)</td>
-        <td style="text-align:right;color:#15803d">₹${fmt.num(Money.fromPaise(totalAdvancePaise))}</td>
-        <td colspan="3"></td>
-      </tr></tfoot>
-    </table>
-    <p style="font-size:9px;color:#b91c1c;margin:3px 0">⚠ Accounts overdue &gt;30 days or over credit limit must be escalated to OMC Sales Officer. MDG Clause 9.3.</p>
-    <div style="margin-top:20px;display:flex;justify-content:space-between">
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:130px;margin:24px auto 0"></div><div style="font-size:9px">Accountant</div></div>
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:130px;margin:24px auto 0"></div><div style="font-size:9px">Dealer / Manager &amp; Stamp</div></div>
-    </div>`;
-  _showComplianceReport(html);
-}
-async function generateMusterRoll(){
-  const settings=APP.settings||{};
-  const monthStr=document.getElementById('mr-month')?.value||fmt.today().slice(0,7);
-  const [y,m]=monthStr.split('-').map(Number);
-  const days=new Date(y,m,0).getDate();
-
-  // Attendance records keyed as pbms_attend_ATT-{date}-{staffId}
-  const attendRecords=DB.listKeys('pbms_attend_').map(k=>DB.get(k))
-    .filter(a=>a&&a.date&&a.date.startsWith(monthStr));
-  const presentDates={};   // staffId → {date: bool}
-  const otByDate={};       // staffId → {date: otHours}
-  attendRecords.forEach(a=>{
-    if(!presentDates[a.staffId])presentDates[a.staffId]={};
-    if(!otByDate[a.staffId])otByDate[a.staffId]={};
-    presentDates[a.staffId][a.date]=a.present;
-    if(a.otHours)otByDate[a.staffId][a.date]=a.otHours;
-  });
-
-  const staff=DB.listKeys('pbms_staff_').map(k=>DB.get(k))
-    .filter(Boolean).filter(s=>s.active!==false)
-    .sort((a,b)=>(a.name||'').localeCompare(b.name||''));
-
-  const today=fmt.today();
-  const workingDays=Array.from({length:days},(_,i)=>`${monthStr}-${String(i+1).padStart(2,'0')}`)
-    .filter(d=>d<=today).length;
-
-
-  const dayHeaders=Array.from({length:days},(_,i)=>`<th style="padding:2px 3px;font-size:8px;text-align:center;min-width:14px">${i+1}</th>`).join('');
-
-  const staffRows=staff.map(s=>{
-    const staffAtt=presentDates[s.id]||{};
-    const staffOt=otByDate[s.id]||{};
-    let present=0,absent=0,totalOtHours=0;
-    const cells=[];
-    for(let d=1;d<=days;d++){
-      const ds=`${monthStr}-${String(d).padStart(2,'0')}`;
-      const isP=staffAtt.hasOwnProperty(ds)?staffAtt[ds]:null;
-      const ot=staffOt[ds]||0;
-      if(ot>0)totalOtHours+=ot;
-      if(isP===true){present++;cells.push(`<td style="text-align:center;color:#15803d;font-size:8px;padding:1px">${ot>0?'P*':'P'}</td>`);}
-      else if(isP===false){absent++;cells.push('<td style="text-align:center;color:#b91c1c;font-size:8px;padding:1px">A</td>');}
-      else{cells.push('<td style="text-align:center;color:#ccc;font-size:8px;padding:1px">-</td>');}
-    }
-
-
-    return `<tr>
-      <td style="padding:2px 5px;font-size:10px;white-space:nowrap;font-weight:600">${s.name}</td>
-      <td style="font-size:9px;color:#555;white-space:nowrap">${s.role||'-'}</td>
-      <td style="font-size:9px;white-space:nowrap">${s.joiningDate||'—'}</td>
-      ${cells.join('')}
-      <td style="text-align:center;font-weight:bold;color:#15803d;font-size:10px">${present}</td>
-      <td style="text-align:center;font-weight:bold;color:#b91c1c;font-size:10px">${absent}</td>
-      <td style="text-align:right;font-size:10px">${totalOtHours>0?totalOtHours+'h':'—'}</td>
-    </tr>`;
-  }).join('');
-
-
-
-  const html=`
-    ${_complianceHeader(settings,'STAFF MUSTER ROLL','Labour Department Format | ESI / PF Register — Form B',`Month: ${monthStr} | Generated: ${fmt.today()}`)}
-    <p style="font-size:9px;color:#555;margin:3px 0">
-      Establishment: <strong>${settings.stationName||''}</strong> |
-      ESI Code: <strong>${settings.esiCode||'—'}</strong> |
-      PF Account No.: <strong>${settings.pfAccount||'—'}</strong> |
-      Factory/Shop Reg: <strong>${settings.shopRegNo||'—'}</strong>
-    </p>
-    <p style="font-size:9px;color:#666;background:#fffbeb;border:1px solid #fcd34d;padding:3px 6px;border-radius:4px;margin-bottom:6px">* = OT worked this day</p>
-    <div style="overflow-x:auto">
-    <table style="border-collapse:collapse;font-size:10px;white-space:nowrap">
-      <thead>
-        <tr style="background:#1e3a5f;color:#fff">
-          <th style="padding:4px 5px" rowspan="2">Name</th>
-          <th rowspan="2">Role</th>
-          <th rowspan="2">Joined</th>
-          ${dayHeaders}
-          <th rowspan="2">P</th><th rowspan="2">A</th><th rowspan="2">OT Hrs</th>
-        </tr>
-        <tr style="background:#374151;color:#fff;font-size:9px">
-          ${Array.from({length:days},(_,i)=>'<th></th>').join('')}
-        </tr>
-      </thead>
-      <tbody>${staffRows||`<tr><td colspan="${days+14}" style="text-align:center;padding:12px;color:#888">No active staff found</td></tr>`}</tbody>
-    </table>
-    </div>
-
-    <div style="margin-top:20px;display:flex;justify-content:space-between">
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:130px;margin:24px auto 0"></div><div style="font-size:9px">Manager / Dealer</div></div>
-      <div style="text-align:center"><div style="border-top:1px solid #000;width:130px;margin:24px auto 0"></div><div style="font-size:9px">ESI / PF Inspector (if inspected)</div></div>
-    </div>
-    <p style="font-size:9px;color:#666;text-align:center;margin-top:8px">
-      Retain for 3 years | Submit ESI returns by 15th, PF returns by 15th of following month
-    </p>`;
-  _showComplianceReport(html);
-}
 // ═══════════════════════════════════════════════════════════════
 // AUDIT TRAIL VIEWER — with chain integrity check
 // ═══════════════════════════════════════════════════════════════
@@ -8690,8 +7811,14 @@ function renderLedgerView(el,entries,page){
   const totalPages=Math.ceil(entries.length/LEDGER_PAGE_SIZE);
   // Clamp page to valid range
   page=Math.max(1,Math.min(page,totalPages));APP._crPage=page;
+  // Entries are computed and balanced in chronological order (oldest→newest) —
+  // that's required for the running Balance column to be correct. But on
+  // screen, the newest transaction should show at the top. Reverse only for
+  // display/pagination; totals below still use the original chronological
+  // `entries` array.
+  const displayEntries=[...entries].reverse();
   const start=(page-1)*LEDGER_PAGE_SIZE;
-  const pageRows=entries.slice(start,start+LEDGER_PAGE_SIZE);
+  const pageRows=displayEntries.slice(start,start+LEDGER_PAGE_SIZE);
   const totDebit =entries.reduce((s,e)=>s+e.debit, 0);
   const totCredit=entries.reduce((s,e)=>s+e.credit,0);
   // Closing balance = each shown customer's actual account balance as of "to"
@@ -11030,7 +10157,7 @@ function saveShopParty(kind,id){
 function openShopPartyLedgerModal(id,kind){
   const p=getShopParty(id);if(!p)return;
   const docs=kind==='customer'?listShopSales().filter(s=>s.partyId===id):listShopPurchases().filter(x=>x.partyId===id);
-  docs.sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  docs.sort((a,b)=>(b.date||'').localeCompare(a.date||'')||(b.createdAt||'').localeCompare(a.createdAt||''));
   const bal=computeShopPartyBalance(id);
   showModal(`<div class="p-5" style="max-width:640px;max-height:80vh;overflow-y:auto">
     <div class="flex items-center justify-between mb-1">
