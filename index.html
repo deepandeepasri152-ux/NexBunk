@@ -5666,24 +5666,46 @@ async function editLoan(id){
   </div>`,()=>loadCreditTab('loan'));
 }
 // ====================================================
-// PAGE 6: CASH & BANKING — 3 TABS
 // ====================================================
-// ====================================================
-// PAGE 6: CASH & BANKING — Expert Accountant v2
-// 5 Tabs: Daily Settlement | Cash Book | Bank Book | Bank Reconciliation | Petty Cash
+// PAGE 6: CASH & BANKING — rebuilt from scratch
+// Two real, separate ledgers:
+//   • Cash Book  — physical cash on hand at the station
+//   • Bank Book  — the actual bank account
+// They are linked ONLY by an explicit "Transfer" action (depositing
+// cash into the bank, or withdrawing cash out of the bank) — never by
+// treating every payment mode as one blended pool the way the old
+// module did.
+//
+// Each ledger blends two kinds of entries:
+//   • SYS  — auto-posted, computed live from the underlying records
+//            everywhere else in the app (shift settlements, shop
+//            sales, credit/loan activity, purchases, expenses…),
+//            split into this book by that record's own payment mode
+//            (mode==='Cash' → Cash Book, everything else → Bank Book).
+//            There is nothing to "save" for these — they simply
+//            reflect reality the moment something happens elsewhere.
+//   • MAN  — manual entries the person records directly against a
+//            book: deposits/withdrawals (via Transfer), bank charges,
+//            interest, or any other manual adjustment. Stored as
+//            pbms_cashbook_tx_<id> / pbms_bankbook_tx_<id>.
 // ====================================================
 
-// ====================================================
-// PAGE 6: CASH & BANKING — 2 Tabs: Daily Settlement | Bank Book
-// ====================================================
+const LEDGER_BOOKS={
+  cash:{label:'Cash Book',icon:'💵',openingKey:'pbms_cashbook_opening',txPrefix:'pbms_cashbook_tx_',
+    inCats:['Cash Received — Other','Manual Adjustment (In)'],
+    outCats:['Cash Paid — Other','Manual Adjustment (Out)']},
+  bank:{label:'Bank Book',icon:'🏦',openingKey:'pbms_bankbook_opening',txPrefix:'pbms_bankbook_tx_',
+    inCats:['Bank Interest','Bank Credit — Other','Manual Adjustment (In)'],
+    outCats:['Bank Charges','Bank Debit — Other','Manual Adjustment (Out)']}
+};
 
 async function renderCash(el){
   const settings=APP.settings||{};
-  const tab=APP.tabs?.cash||'settlement';
+  const tab=APP.tabs?.cash||'cashbook';
   el.innerHTML=`${pageHeader('Cash & Banking',settings.stationName||'Station')}
   <div class="border-b border-slate-200 mb-5 flex no-print overflow-x-auto">
-    <button data-ctab="settlement"  class="tab-btn ${tab==='settlement'?'active':''}"  onclick="switchCashTab('settlement')">Daily Bank Book</button>
-    <button data-ctab="bankbook"    class="tab-btn ${tab==='bankbook'?'active':''}"    onclick="switchCashTab('bankbook')">Bank Book</button>
+    <button data-ctab="cashbook" class="tab-btn ${tab==='cashbook'?'active':''}" onclick="switchCashTab('cashbook')">💵 Cash Book</button>
+    <button data-ctab="bankbook" class="tab-btn ${tab==='bankbook'?'active':''}" onclick="switchCashTab('bankbook')">🏦 Bank Book</button>
   </div>
   <div id="cash-tab-content"></div>`;
   await loadCashTab(tab);
@@ -5697,164 +5719,62 @@ function switchCashTab(tab){
 
 async function loadCashTab(tab){
   const el=document.getElementById('cash-tab-content');if(!el)return;
-  if(tab==='settlement')await renderDailyBankBookTab(el);
-  else if(tab==='bankbook')await renderBankBook(el);
+  const book=tab==='bankbook'?'bank':'cash';
+  await renderLedgerTab(book,el);
 }
 
 // ────────────────────────────────────────────────────
-// TAB 1 — DAILY SETTLEMENT
+// SHARED LEDGER TAB — renders whichever book is active
 // ────────────────────────────────────────────────────
 
-async function renderDailyBankBookTab(el){
-  const today=fmt.today();
-  if(!APP.tabs)APP.tabs={};
-  if(!APP.tabs.settlDate)APP.tabs.settlDate=today;
-  const date=APP.tabs.settlDate;
-  el.innerHTML=`
-  <div class="flex items-center gap-2 mb-5 no-print flex-wrap">
-    <button onclick="shiftDailyBankDate(-1)" class="btn btn-ghost btn-sm px-2">◀</button>
-    <input type="date" id="settl-date" class="form-input w-40 text-sm" value="${date}" max="${today}"
-      onchange="goToDailyBankDate(this.value)">
-    <button onclick="shiftDailyBankDate(1)" class="btn btn-ghost btn-sm px-2">▶</button>
-    <span class="text-sm text-slate-400 ml-2">${fmt.date(date)}</span>
-    ${date!==today?`<button onclick="goToDailyBankDate('${today}')" class="btn btn-ghost btn-sm text-xs text-blue-600 ml-auto">Today</button>`:''}
-  </div>
-  <div id="settl-body"><div class="flex items-center justify-center h-24">
-    <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
-  </div></div>`;
-  await loadDailyBankBookForDate(date);
-}
+function ledgerMonthKey(book){return book==='cash'?'cbMonth':'bbMonth';}
 
-// Single entry point for changing the viewed date — re-renders the whole
-// nav bar so the label and "Today" button are always correct, whether the
-// person used the prev/next arrows, typed in the date picker, or tapped
-// "Today". (An earlier version patched the DOM piecemeal per-trigger and
-// the date-picker path silently forgot to update the label/Today button.)
-function goToDailyBankDate(val){
-  if(!APP.tabs)APP.tabs={};
-  APP.tabs.settlDate=val;
-  const el=document.getElementById('cash-tab-content');
-  if(el)renderDailyBankBookTab(el);
-}
-
-function shiftDailyBankDate(dir){
-  if(!APP.tabs)APP.tabs={};
-  const d=new Date(APP.tabs.settlDate);d.setDate(d.getDate()+dir);
-  const nd=d.toISOString().split('T')[0];
-  if(nd>fmt.today())return;
-  goToDailyBankDate(nd);
-}
-
-// Every single transaction for one date — shift settlements and shop sales
-// are already automatic (see buildBankBook), so this page is purely a
-// read-only, pick-a-date view of what actually happened. No "save" step.
-async function loadDailyBankBookForDate(date){
-  const el=document.getElementById('settl-body');if(!el)return;
-  el.innerHTML=`<div class="flex items-center justify-center h-24"><div class="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div></div>`;
-
-  const{dayRows,openingForDay,closingForDay,totalIn,totalOut}=await buildDailyBankBookData(date);
-
-  el.innerHTML=`
-  <div class="ldg-pumpslip no-print">
-    <div class="ldg-pumpslip-stamp">BANK BOOK</div>
-    <div style="font-family:var(--font-display);font-weight:600;font-size:1rem;color:var(--ink);">Daily Bank Book</div>
-    <div style="font-size:.8rem;color:var(--muted);margin-top:2px;">${fmt.date(date)} · ${dayRows.length} transaction${dayRows.length!==1?'s':''}</div>
-  </div>
-
-  <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
-    <div class="card p-3 text-center">
-      <div class="text-xs text-slate-400 mb-1">Opening Balance</div>
-      <div class="font-mono font-bold text-slate-700">${fmt.currency(openingForDay)}</div>
-    </div>
-    <div class="card p-3 text-center">
-      <div class="text-xs text-slate-400 mb-1">Total In</div>
-      <div class="font-mono font-bold text-green-700">${fmt.currency(totalIn)}</div>
-    </div>
-    <div class="card p-3 text-center">
-      <div class="text-xs text-slate-400 mb-1">Total Out</div>
-      <div class="font-mono font-bold text-red-600">${fmt.currency(totalOut)}</div>
-    </div>
-    <div class="card p-3 text-center">
-      <div class="text-xs text-slate-400 mb-1">Closing Balance</div>
-      <div class="font-mono font-bold ${closingForDay<0?'text-red-600':'text-blue-700'}">${fmt.currency(closingForDay)}</div>
-    </div>
-  </div>
-
-  ${dayRows.length?`<div class="card overflow-hidden mb-5">
-    <div class="px-4 py-3 border-b border-slate-100 bg-slate-50">
-      <h2 class="font-semibold text-slate-700 text-sm">Every Transaction — ${fmt.date(date)}</h2>
-    </div>
-    <div class="overflow-x-auto">
-      <table class="data-table text-sm"><thead><tr>
-        <th>Time</th><th>Description</th><th>Type</th><th>Ref</th>
-        <th class="text-right">In ₹</th><th class="text-right">Out ₹</th><th class="text-right">Balance ₹</th>
-      </tr></thead><tbody>
-      ${[...dayRows].reverse().map(r=>`<tr>
-        <td class="whitespace-nowrap text-xs text-slate-400">${fmt.timeOf(r.createdAt)||'—'}</td>
-        <td class="max-w-xs text-sm">${r.desc}</td>
-        <td><span class="badge ${bankTypeStyle(r.type)} text-xs">${r.type}</span></td>
-        <td class="text-xs text-slate-400 font-mono">${r.ref||'—'}</td>
-        <td class="text-right font-mono ${r.in>0?'text-green-700':''}">${r.in>0?fmt.currency(r.in):'—'}</td>
-        <td class="text-right font-mono ${r.out>0?'text-red-600':''}">${r.out>0?fmt.currency(r.out):'—'}</td>
-        <td class="text-right font-mono font-semibold ${r.balance<0?'text-red-600':'text-slate-800'}">${fmt.currency(r.balance)}</td>
-      </tr>`).join('')}
-      </tbody></table>
-    </div>
-  </div>`:`<div class="card p-8 text-center text-slate-400 mb-5 text-sm">
-    <div class="text-2xl mb-1">📋</div>
-    No transactions recorded for ${fmt.date(date)}.
-  </div>`}
-  <p class="text-xs text-slate-400 text-center no-print">Shift settlements, shop sales, expenses, purchases, credit &amp; loan activity all appear here automatically — nothing to save on this page.</p>`;
-}
-
-
-// ────────────────────────────────────────────────────
-// TAB 2 — BANK BOOK
-// ────────────────────────────────────────────────────
-
-async function renderBankBook(el){
+async function renderLedgerTab(book,el){
+  const cfg=LEDGER_BOOKS[book];
   const today=fmt.today();
   const now=new Date(today);
   if(!APP.tabs)APP.tabs={};
-  if(!APP.tabs.bbMonth){
-    APP.tabs.bbMonth=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
-  }
-  const ob=DB.get('pbms_bank_opening_balance');
+  const monthKey=ledgerMonthKey(book);
+  if(!APP.tabs[monthKey])APP.tabs[monthKey]=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  const ob=DB.get(cfg.openingKey);
   el.innerHTML=`
   <div class="flex items-center gap-2 mb-5 flex-wrap no-print">
-    <span class="text-sm font-semibold text-slate-600">Bank Book</span>
-    <button onclick="shiftBBMonth(-1)" class="btn btn-ghost btn-sm px-2">◀</button>
-    <span id="bb-month-label" class="text-sm font-medium text-slate-800 w-28 text-center">${formatMonth(APP.tabs.bbMonth)}</span>
-    <button onclick="shiftBBMonth(1)" class="btn btn-ghost btn-sm px-2">▶</button>
-    ${ob?`<span class="text-xs text-slate-500 ml-2">Opening: ${fmt.currency(ob.amount)}</span>
-    <button onclick="resetBankOpeningBalance()" class="btn btn-ghost btn-sm text-xs">Edit</button>`:''}
-    <div class="relative ml-auto no-print" id="bb-dl-wrap">
-      <button onclick="document.getElementById('bb-dl-menu').classList.toggle('hidden')" class="btn btn-ghost btn-sm">
-        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>Download ▾
-      </button>
-      <div id="bb-dl-menu" class="hidden absolute right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg z-10 min-w-36">
-        <button onclick="downloadBankBookExcel()" class="w-full text-left px-4 py-2 text-sm hover:bg-slate-50 flex items-center gap-2">📊 Excel (.xlsx)</button>
-        <button onclick="downloadBankBookPDF()" class="w-full text-left px-4 py-2 text-sm hover:bg-slate-50 flex items-center gap-2">📄 PDF</button>
+    <button onclick="shiftLedgerMonth('${book}',-1)" class="btn btn-ghost btn-sm px-2">◀</button>
+    <span id="${book}-month-label" class="text-sm font-medium text-slate-800 w-28 text-center">${formatMonth(APP.tabs[monthKey])}</span>
+    <button onclick="shiftLedgerMonth('${book}',1)" class="btn btn-ghost btn-sm px-2">▶</button>
+    ${ob?`<span class="text-xs text-slate-500 ml-2">Opening: ${fmt.currency(ob.amount)} (${fmt.date(ob.asOfDate)})</span>
+    <button onclick="editOpeningBalance('${book}')" class="btn btn-ghost btn-sm text-xs">Edit</button>`:''}
+    <div class="flex items-center gap-2 ml-auto no-print flex-wrap">
+      <button onclick="showTransferModal('${book==='cash'?'toBank':'toCash'}')" class="btn btn-ghost btn-sm">⇄ Transfer</button>
+      <button onclick="showManualEntryModal('${book}')" class="btn btn-primary btn-sm">+ Manual Entry</button>
+      <div class="relative" id="${book}-dl-wrap">
+        <button onclick="document.getElementById('${book}-dl-menu').classList.toggle('hidden')" class="btn btn-ghost btn-sm">
+          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>Download ▾
+        </button>
+        <div id="${book}-dl-menu" class="hidden absolute right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg z-10 min-w-36">
+          <button onclick="downloadLedgerExcel('${book}')" class="w-full text-left px-4 py-2 text-sm hover:bg-slate-50 flex items-center gap-2">📊 Excel (.xlsx)</button>
+          <button onclick="downloadLedgerPDF('${book}')" class="w-full text-left px-4 py-2 text-sm hover:bg-slate-50 flex items-center gap-2">📄 PDF</button>
+        </div>
       </div>
     </div>
   </div>
   ${!ob?`<div class="card p-5 mb-5 max-w-md border-amber-200 bg-amber-50">
-    <h3 class="font-bold text-amber-700 mb-2">⚠ Set Bank Opening Balance</h3>
-    <p class="text-xs text-amber-600 mb-3">Enter the bank balance once to activate the ledger.</p>
+    <h3 class="font-bold text-amber-700 mb-2">⚠ Set ${cfg.label} Opening Balance</h3>
+    <p class="text-xs text-amber-600 mb-3">Enter the ${book==='cash'?'cash on hand':'bank balance'} once, as of a cutover date, to activate this ledger.</p>
     <div class="grid grid-cols-2 gap-3">
       <div><label class="form-label text-xs">Amount ₹</label>
-        <input type="number" id="ob-amt" class="form-input text-right font-mono" step="0.01" min="0" placeholder="0.00"></div>
+        <input type="number" id="${book}-ob-amt" class="form-input text-right font-mono" step="0.01" min="0" placeholder="0.00"></div>
       <div><label class="form-label text-xs">As of Date</label>
-        <input type="date" id="ob-date" class="form-input" value="${today}" max="${today}"></div>
+        <input type="date" id="${book}-ob-date" class="form-input" value="${today}" max="${today}"></div>
     </div>
-    <button onclick="saveBankOpeningBalance()" class="btn btn-primary mt-3">Save Opening Balance</button>
+    <button onclick="saveOpeningBalance('${book}')" class="btn btn-primary mt-3">Save Opening Balance</button>
   </div>`:''}
-  <div id="bb-content">
+  <div id="${book}-content">
     ${ob?`<div class="flex items-center justify-center h-24">
       <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
     </div>`:''}
   </div>`;
-  if(ob)await loadBankBook();
+  if(ob)await loadLedgerBody(book);
 }
 
 function formatMonth(ym){
@@ -5862,48 +5782,55 @@ function formatMonth(ym){
   return new Date(parseInt(y),parseInt(m)-1,1).toLocaleString('en-IN',{month:'long',year:'numeric'});
 }
 
-function shiftBBMonth(dir){
+function shiftLedgerMonth(book,dir){
   if(!APP.tabs)APP.tabs={};
-  const[y,m]=APP.tabs.bbMonth.split('-').map(Number);
+  const monthKey=ledgerMonthKey(book);
+  const[y,m]=APP.tabs[monthKey].split('-').map(Number);
   const d=new Date(y,m-1+dir,1);
-  APP.tabs.bbMonth=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-  const lbl=document.getElementById('bb-month-label');
-  if(lbl)lbl.textContent=formatMonth(APP.tabs.bbMonth);
-  loadBankBook();
+  APP.tabs[monthKey]=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+  const lbl=document.getElementById(`${book}-month-label`);
+  if(lbl)lbl.textContent=formatMonth(APP.tabs[monthKey]);
+  loadLedgerBody(book);
 }
 
-async function saveBankOpeningBalance(){
-  const amt=parseFloat(document.getElementById('ob-amt')?.value)||0;
-  const date=document.getElementById('ob-date')?.value;
+async function saveOpeningBalance(book){
+  const cfg=LEDGER_BOOKS[book];
+  const amt=parseFloat(document.getElementById(`${book}-ob-amt`)?.value)||0;
+  const date=document.getElementById(`${book}-ob-date`)?.value;
   if(!date){toast('Select a date','error');return;}
-  DB.set('pbms_bank_opening_balance',{amount:amt,asOfDate:date});
-  toast('Opening balance saved','success');
-  await renderBankBook(document.getElementById('cash-tab-content'));
+  DB.set(cfg.openingKey,{amount:amt,asOfDate:date});
+  await Audit.log('ledger_opening_balance_set',book==='cash'?'cashbook':'bankbook',null,{amount:amt,asOfDate:date});
+  toast(`${cfg.label} opening balance saved`,'success');
+  await renderLedgerTab(book,document.getElementById('cash-tab-content'));
 }
 
-async function resetBankOpeningBalance(){
-  const ob=DB.get('pbms_bank_opening_balance');
-  showModal(`<div class="p-6">
-    <div class="flex items-center justify-between mb-4">
-      <h2 class="text-lg font-bold text-slate-800">Edit Opening Balance</h2>
-      <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600">✕</button>
-    </div>
-    <div class="grid grid-cols-2 gap-4">
-      <div><label class="form-label">Amount ₹</label>
-        <input type="number" id="ob-amt" class="form-input text-right font-mono" value="${ob?.amount||0}" step="0.01" min="0"></div>
-      <div><label class="form-label">As of Date</label>
-        <input type="date" id="ob-date" class="form-input" value="${ob?.asOfDate||fmt.today()}" max="${fmt.today()}"></div>
-    </div>
-    <div class="flex gap-3 justify-end mt-5 pt-4 border-t border-slate-100">
-      <button onclick="closeModal()" class="btn btn-ghost">Cancel</button>
-      <button onclick="saveBankOpeningBalance()" class="btn btn-primary">Save</button>
-    </div>
-  </div>`);
+function editOpeningBalance(book){
+  requirePIN(`Editing the ${LEDGER_BOOKS[book].label} opening balance requires manager approval`,()=>{
+    const cfg=LEDGER_BOOKS[book];
+    const ob=DB.get(cfg.openingKey);
+    showModal(`<div class="p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-bold text-slate-800">Edit ${cfg.label} Opening Balance</h2>
+        <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600">✕</button>
+      </div>
+      <div class="grid grid-cols-2 gap-4">
+        <div><label class="form-label">Amount ₹</label>
+          <input type="number" id="${book}-ob-amt" class="form-input text-right font-mono" value="${ob?.amount||0}" step="0.01" min="0"></div>
+        <div><label class="form-label">As of Date</label>
+          <input type="date" id="${book}-ob-date" class="form-input" value="${ob?.asOfDate||fmt.today()}" max="${fmt.today()}"></div>
+      </div>
+      <div class="flex gap-3 justify-end mt-5 pt-4 border-t border-slate-100">
+        <button onclick="closeModal()" class="btn btn-ghost">Cancel</button>
+        <button onclick="saveOpeningBalance('${book}')" class="btn btn-primary">Save</button>
+      </div>
+    </div>`);
+  });
 }
 
-async function loadBankBook(){
-  const el=document.getElementById('bb-content');if(!el)return;
-  const month=APP.tabs?.bbMonth;if(!month)return;
+async function loadLedgerBody(book){
+  const el=document.getElementById(`${book}-content`);if(!el)return;
+  const monthKey=ledgerMonthKey(book);
+  const month=APP.tabs?.[monthKey];if(!month)return;
   const[y,m]=month.split('-');
   const fromDate=`${month}-01`;
   const lastDay=new Date(parseInt(y),parseInt(m),0).getDate();
@@ -5913,44 +5840,46 @@ async function loadBankBook(){
     <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
   </div>`;
 
-  const{rows,stats,pending}=await buildBankBook(fromDate,toDate);
+  const{rows,stats,pending}=buildLedger(book,fromDate,toDate);
   const balance=rows.length?rows[rows.length-1].balance:stats.openingBalance;
   const pendingTotal=pending.reduce((s,p)=>s+(p.dueAmount!=null?p.dueAmount:(p.invoiceAmount||0)),0);
+  const cfg=LEDGER_BOOKS[book];
 
   el.innerHTML=`
-  <!-- Summary strip -->
   <div class="card px-4 py-3 mb-5">
     <div class="flex flex-wrap gap-x-6 gap-y-1.5 text-sm">
       <span class="text-slate-500">Opening: <strong class="text-slate-800">${fmt.currency(stats.openingBalance)}</strong></span>
       <span class="text-slate-500">Total In: <strong class="text-green-700">${fmt.currency(stats.totalIn)}</strong></span>
       <span class="text-slate-500">Total Out: <strong class="text-red-600">${fmt.currency(stats.totalOut)}</strong></span>
-      <span class="text-slate-500">Bank Balance: <strong class="${balance<0?'text-red-600':'text-green-700'}">${fmt.currency(balance)}</strong>${balance<0?' <span class="text-xs text-red-500">(overdrawn)</span>':''}</span>
+      <span class="text-slate-500">${book==='cash'?'Cash in Hand':'Bank Balance'}: <strong class="${balance<0?'text-red-600':'text-green-700'}">${fmt.currency(balance)}</strong>${balance<0?' <span class="text-xs text-red-500">(overdrawn)</span>':''}</span>
     </div>
   </div>
 
-  <!-- Ledger table -->
   ${rows.length?`<div class="card overflow-hidden mb-5">
     <div class="overflow-x-auto">
       <table class="data-table text-sm"><thead><tr>
         <th>Date</th><th>Description</th><th>Type</th><th>Ref</th>
-        <th class="text-right">In ₹</th><th class="text-right">Out ₹</th><th class="text-right">Balance ₹</th>
+        <th class="text-right">In ₹</th><th class="text-right">Out ₹</th><th class="text-right">Balance ₹</th><th class="no-print">Action</th>
       </tr></thead><tbody>
       ${[...rows].reverse().map(r=>`<tr>
         <td class="whitespace-nowrap text-xs">${fmt.date(r.date)}<div class="text-slate-400">${fmt.timeOf(r.createdAt)}</div></td>
         <td class="max-w-xs text-sm">${r.desc}</td>
-        <td><span class="badge ${bankTypeStyle(r.type)} text-xs">${r.type}</span></td>
+        <td><span class="badge ${ledgerTypeStyle(r.type)} text-xs">${r.type}</span>${r.manual?' <span class="badge badge-gray text-xs" title="Manually entered">MAN</span>':(r.type==='Opening'?'':' <span class="badge badge-gray text-xs" title="Posted automatically from elsewhere in the app">SYS</span>')}</td>
         <td class="text-xs text-slate-400 font-mono">${r.ref||'—'}</td>
         <td class="text-right font-mono ${r.in>0?'text-green-700':''}">${r.in>0?fmt.currency(r.in):'—'}</td>
         <td class="text-right font-mono ${r.out>0?'text-red-600':''}">${r.out>0?fmt.currency(r.out):'—'}</td>
         <td class="text-right font-mono font-semibold ${r.balance<0?'text-red-600':'text-slate-800'}">${fmt.currency(r.balance)}</td>
+        <td class="no-print whitespace-nowrap">${r.manual?(r.transferId
+          ?`<button onclick="deleteTransfer('${r.transferId}')" class="btn btn-sm btn-red-sm">Del</button>`
+          :`<button onclick="editManualEntry('${book}','${r.id}')" class="btn btn-sm btn-ghost">Edit</button>
+             <button onclick="deleteManualEntry('${book}','${r.id}')" class="btn btn-sm btn-red-sm">Del</button>`):''}</td>
       </tr>`).join('')}
       </tbody></table>
     </div>
-  </div>`:`<div class="card p-8 text-center text-slate-400 mb-5 text-sm">No bank transactions in this period</div>`}
+  </div>`:`<div class="card p-8 text-center text-slate-400 mb-5 text-sm">No ${cfg.label.toLowerCase()} transactions in this period</div>`}
 
-  <!-- Summary breakdown -->
   <div class="card p-5 mb-5">
-    <h3 class="font-bold text-slate-700 mb-4 text-sm uppercase tracking-wider">Bank Balance Summary — ${formatMonth(APP.tabs.bbMonth)}</h3>
+    <h3 class="font-bold text-slate-700 mb-4 text-sm uppercase tracking-wider">${cfg.label} Summary — ${formatMonth(month)}</h3>
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-6 text-sm">
       <div class="space-y-2">
         <div class="flex justify-between py-1.5 border-b border-slate-100">
@@ -5958,12 +5887,7 @@ async function loadBankBook(){
           <span class="font-mono font-semibold">${fmt.currency(stats.openingBalance)}</span>
         </div>
         <div class="text-xs font-bold text-slate-400 uppercase pt-1">Money In</div>
-        ${[['Cash Deposits',stats.cashDep],['UPI Collections',stats.upi],
-           ['Card Collections',stats.card],
-           ['Credit Recovery',stats.credit],
-           ['Shop Credit Recovery',stats.shopIn],
-           ['Loan Received',stats.loanIn],
-           ['Incentive',stats.incentiveDueIn]].filter(([,v])=>v>0).map(([l,v])=>
+        ${Object.entries(stats.inBreakdown).filter(([,v])=>v>0).map(([l,v])=>
           `<div class="flex justify-between py-1 border-b border-slate-50">
             <span class="text-slate-500">${l}</span>
             <span class="font-mono text-green-700">${fmt.currency(v)}</span>
@@ -5974,7 +5898,7 @@ async function loadBankBook(){
       </div>
       <div class="space-y-2">
         <div class="text-xs font-bold text-slate-400 uppercase pt-1">Money Out</div>
-        ${[['Cash Advance to Customers',stats.advanceOut],['Fuel Purchase Payments',stats.fuelOut],['Oil/Lube Payments',stats.oilOut],['Shop Purchase Payments',stats.shopOut],['Loan Repaid',stats.loanOut],['Bank Expenses',stats.expOut]].filter(([,v])=>v>0).map(([l,v])=>
+        ${Object.entries(stats.outBreakdown).filter(([,v])=>v>0).map(([l,v])=>
           `<div class="flex justify-between py-1 border-b border-slate-50">
             <span class="text-slate-500">${l}</span>
             <span class="font-mono text-red-600">${fmt.currency(v)}</span>
@@ -5983,17 +5907,16 @@ async function loadBankBook(){
           <span>Total Out</span><span class="font-mono text-red-600">${fmt.currency(stats.totalOut)}</span>
         </div>
         <div class="flex justify-between py-2 border-t-2 border-slate-400 font-bold text-base">
-          <span>Closing Bank Balance</span>
+          <span>Closing ${book==='cash'?'Cash in Hand':'Bank Balance'}</span>
           <span class="font-mono ${balance<0?'text-red-600':'text-green-700'}">${fmt.currency(balance)}</span>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Pending fuel payments -->
-  ${pending.length?`<div class="card overflow-hidden" style="border-color:#fde68a">
+  ${book==='bank'&&pending.length?`<div class="card overflow-hidden" style="border-color:#fde68a">
     <div class="px-4 py-3 border-b border-amber-100 bg-amber-50">
-      <h3 class="font-semibold text-amber-700 text-sm">⚠ Pending Fuel Payments — due amount not yet deducted from balance</h3>
+      <h3 class="font-semibold text-amber-700 text-sm">⚠ Pending Fuel Payments — due amount not yet deducted from any ledger</h3>
     </div>
     <div class="overflow-x-auto"><table class="data-table text-sm"><thead><tr>
       <th>Date</th><th>Supplier</th><th>Product</th><th>Status</th>
@@ -6012,19 +5935,18 @@ async function loadBankBook(){
     </tbody></table></div>
     <div class="px-4 py-3 border-t border-amber-100 bg-amber-50 flex items-center justify-between text-sm flex-wrap gap-2">
       <span class="text-amber-700 font-medium">Total Due: ${fmt.currency(pendingTotal)}</span>
-      <span class="text-amber-600">Balance after payment:
-        <strong class="${(balance-pendingTotal)<0?'text-red-600':'text-green-700'}">${fmt.currency(balance-pendingTotal)}</strong>
-      </span>
     </div>
   </div>`:''}`;
 }
 
-function bankTypeStyle(type){
+function ledgerTypeStyle(type){
   const map={
     'Opening':          'badge-gray',
     'Cash Deposit':     'badge-blue',
     'UPI':              'text-indigo-700 bg-indigo-100',
     'Card':             'text-teal-700 bg-teal-100',
+    'Bank Transfer':    'text-blue-700 bg-blue-100',
+    'Cheque':           'text-cyan-700 bg-cyan-100',
     'Credit Recovery':  'text-green-700 bg-green-100',
     'Loan Received':    'text-purple-700 bg-purple-100',
     'Loan Repaid':      'badge-orange',
@@ -6035,253 +5957,402 @@ function bankTypeStyle(type){
     'Shop Payment':     'text-rose-700 bg-rose-100',
     'Shop Recovery':    'text-lime-700 bg-lime-100',
     'Incentive':        'text-green-700 bg-green-100',
-    'Cash Withdrawal':  'badge-red'
+    'Transfer In':       'text-purple-700 bg-purple-100',
+    'Transfer Out':       'text-orange-700 bg-orange-100',
+    'Manual Adjustment (In)':  'text-green-700 bg-green-100',
+    'Manual Adjustment (Out)': 'text-red-700 bg-red-100',
+    'Bank Interest':     'text-green-700 bg-green-100',
+    'Bank Charges':      'badge-amber',
+    'Bank Credit — Other':'text-green-700 bg-green-100',
+    'Bank Debit — Other': 'text-red-700 bg-red-100',
+    'Cash Received — Other':'text-green-700 bg-green-100',
+    'Cash Paid — Other': 'text-red-700 bg-red-100'
   };
   return map[type]||'badge-gray';
 }
 
-// Single-day slice of the Bank Book — every transaction on one date, with
-// the true running balance carried forward (not just that day's own net
-// change). Reuses buildBankBook over the full history up to `date` so the
-// Opening/Closing figures are always accurate, not reset to zero.
-async function buildDailyBankBookData(date){
-  const ob=DB.get('pbms_bank_opening_balance');
-  const from=(ob&&ob.asOfDate&&ob.asOfDate<date)?ob.asOfDate:date;
-  const{rows}=await buildBankBook(from,date);
-  let openingForDay=0;
-  const dayRows=[];
-  for(const r of rows){
-    if(r.date<date)openingForDay=r.balance;
-    else if(r.date===date)dayRows.push(r);
-  }
-  dayRows.sort((a,b)=>(a.createdAt||'').localeCompare(b.createdAt||''));
-  const totalIn=dayRows.reduce((s,r)=>s+(r.in||0),0);
-  const totalOut=dayRows.reduce((s,r)=>s+(r.out||0),0);
-  const closingForDay=round2(openingForDay+totalIn-totalOut);
-  return{dayRows,openingForDay,closingForDay,totalIn,totalOut};
-}
+// ────────────────────────────────────────────────────
+// AUTO (SYS) ROWS — computed live from every other module,
+// split into the Cash Book or Bank Book by each record's own
+// payment mode. Nothing here is ever "saved" — it's a live view.
+// ────────────────────────────────────────────────────
 
-async function buildBankBook(fromDate,toDate){
-  const rows=[];
-  const stats={openingBalance:0,totalIn:0,totalOut:0,cashDep:0,upi:0,card:0,credit:0,loanIn:0,fuelOut:0,loanOut:0,advanceOut:0,expOut:0,incentiveDueIn:0,oilOut:0,shopIn:0,shopOut:0,settlementShortfallOut:0};
+function computeAutoRows(fromDate,toDate){
+  const cashRows=[],bankRows=[];
+  const cashStats=emptyStats(),bankStats=emptyStats();
+  const pending=[];
 
-  // ── Pre-load all reference data in single passes (no N+1) ──
+  const push=(mode,row,amtKey)=>{
+    const isCash=(mode||'Cash')==='Cash';
+    const rows=isCash?cashRows:bankRows;
+    const stats=isCash?cashStats:bankStats;
+    rows.push(row);
+    const bucket=row.in>0?stats.inBreakdown:stats.outBreakdown;
+    bucket[amtKey]=(bucket[amtKey]||0)+(row.in>0?row.in:row.out);
+    if(row.in>0)stats.totalIn+=row.in; else stats.totalOut+=row.out;
+  };
+
   const custMap={};for(const c of DB.listActive('pbms_customer_')){if(c)custMap[c.id]=c;}
-
   const loanMap={};for(const l of DB.listActive('pbms_loan_')){if(l)loanMap[l.id]=l;}
 
-  // 1. Opening balance
-  const ob=DB.get('pbms_bank_opening_balance');
-  if(ob){
-    rows.push({date:ob.asOfDate,desc:'Opening balance',type:'Opening',ref:'',in:ob.amount,out:0,createdAt:ob.asOfDate});
-    stats.openingBalance=ob.amount;
-  }
-
-  // 2. Fuel/oil session collections + Shop sale collections — computed
-  // directly from the underlying records (Cash, UPI, Card). This means the
-  // Bank Book always reflects reality the moment a shift is settled or a
-  // shop sale is billed — there's no separate "save" step anywhere anymore
-  // (see Daily Bank Book, which is a pure read-only view of this same data).
-  // Dated by settlement date (the day cash was actually counted and could
-  // be banked) for sessions, and by sale date for shop billing.
-  const dayCashBB={},dayUpiBB={},dayCardBB={};
+  // 1. Fuel/oil session collections + shop sale collections, by mode —
+  // dated by settlement date (the day cash was actually counted and
+  // could be banked/handled) for sessions, and by sale date for shop
+  // billing. Cash lands as one aggregated "Cash Deposit" row per day;
+  // UPI/Card land as their own aggregated rows per day (these already
+  // post straight to the bank, so aggregating by day avoids one row
+  // per nozzle/customer).
+  const dayCash={},dayUpi={},dayCard={};
   for(const s of DB.listActive('pbms_session_')){
     if(!s||s.status!=='Settled')continue;
     const dt=s.settledDate||s.checkOutDate||s.checkInDate;
     if(!dt||dt<fromDate||dt>toDate)continue;
     const col=s.collections||{};
-    dayCashBB[dt]=(dayCashBB[dt]||0)+(col.cashAmt||0);
-    dayUpiBB[dt]=(dayUpiBB[dt]||0)+(col.upiAmt||0);
-    dayCardBB[dt]=(dayCardBB[dt]||0)+(col.cardAmt||0);
+    dayCash[dt]=(dayCash[dt]||0)+(col.cashAmt||0);
+    dayUpi[dt]=(dayUpi[dt]||0)+(col.upiAmt||0);
+    dayCard[dt]=(dayCard[dt]||0)+(col.cardAmt||0);
   }
   for(const ss of listShopSales()){
     if(!ss||ss.date<fromDate||ss.date>toDate)continue;
     const mode=(ss.payments&&ss.payments[0]?.mode)||'';
     const amt=ss.payments?.[0]?.amount||0;
-    if(mode==='Cash')dayCashBB[ss.date]=(dayCashBB[ss.date]||0)+amt;
-    else if(mode==='UPI')dayUpiBB[ss.date]=(dayUpiBB[ss.date]||0)+amt;
-    else if(mode==='Card')dayCardBB[ss.date]=(dayCardBB[ss.date]||0)+amt;
+    if(mode==='Cash')dayCash[ss.date]=(dayCash[ss.date]||0)+amt;
+    else if(mode==='UPI')dayUpi[ss.date]=(dayUpi[ss.date]||0)+amt;
+    else if(mode==='Card')dayCard[ss.date]=(dayCard[ss.date]||0)+amt;
   }
-  // Credit Recovery is posted as its own row for every mode, including Cash
-  // — see section 3 below — so it's intentionally not folded in here.
-  const settlCreatedAt={};
-  for(const k of DB.listKeys('pbms_daily_settlement_')){const s=DB.get(k);if(s)settlCreatedAt[s.date]=s.createdAt;}
-  for(const dt of Object.keys(dayCashBB).sort()){
-    if(dayCashBB[dt]>0){
-      rows.push({date:dt,desc:'Cash deposit — fuel & shop collections',type:'Cash Deposit',ref:'',in:dayCashBB[dt],out:0,createdAt:settlCreatedAt[dt]||dt});
-      stats.cashDep+=dayCashBB[dt];stats.totalIn+=dayCashBB[dt];
-    }
+  for(const dt of Object.keys(dayCash).sort()){
+    if(dayCash[dt]>0)push('Cash',{date:dt,desc:'Cash — fuel & shop collections',type:'Cash Deposit',ref:'',in:dayCash[dt],out:0,createdAt:dt},'Cash Collections');
   }
-  for(const dt of Object.keys(dayUpiBB).sort()){
-    if(dayUpiBB[dt]>0){
-      rows.push({date:dt,desc:'UPI collections',type:'UPI',ref:'',in:dayUpiBB[dt],out:0,createdAt:settlCreatedAt[dt]||dt});
-      stats.upi+=dayUpiBB[dt];stats.totalIn+=dayUpiBB[dt];
-    }
+  for(const dt of Object.keys(dayUpi).sort()){
+    if(dayUpi[dt]>0)push('UPI',{date:dt,desc:'UPI collections',type:'UPI',ref:'',in:dayUpi[dt],out:0,createdAt:dt},'UPI Collections');
   }
-  for(const dt of Object.keys(dayCardBB).sort()){
-    if(dayCardBB[dt]>0){
-      rows.push({date:dt,desc:'Card collections',type:'Card',ref:'',in:dayCardBB[dt],out:0,createdAt:settlCreatedAt[dt]||dt});
-      stats.card+=dayCardBB[dt];stats.totalIn+=dayCardBB[dt];
-    }
-  }
-  // Legacy bank-shortfall field, kept for backward compatibility with any
-  // settlement saved during the brief window this existed (now obsolete —
-  // expenses no longer net against cash collection at all).
-  for(const k of DB.listKeys('pbms_daily_settlement_')){
-    const s=DB.get(k);if(!s||s.date<fromDate||s.date>toDate)continue;
-    if((s.bankShortfall||0)>0){
-      rows.push({date:s.date,desc:'Cash withdrawn — cash expenses exceeded collection',type:'Cash Withdrawal',ref:'',in:0,out:s.bankShortfall,createdAt:s.createdAt});
-      stats.settlementShortfallOut+=s.bankShortfall;stats.totalOut+=s.bankShortfall;
-    }
+  for(const dt of Object.keys(dayCard).sort()){
+    if(dayCard[dt]>0)push('Card',{date:dt,desc:'Card collections',type:'Card',ref:'',in:dayCard[dt],out:0,createdAt:dt},'Card Collections');
   }
 
-  // 3. Credit payments — any mode, including Cash, posts as its own row now.
+  // 2. Credit payments received — any mode
   for(const p of DB.listActive('pbms_payment_')){
     if(p.date<fromDate||p.date>toDate)continue;
     const custName=custMap[p.customerId]?.name||p.customerName||'Customer';
-    rows.push({date:p.date,desc:`${custName} — ${p.mode||'Cash'} payment`,type:'Credit Recovery',ref:p.referenceNo||'',in:p.amount||0,out:0,createdAt:p.createdAt});
-    stats.credit+=p.amount||0;stats.totalIn+=p.amount||0;
+    const mode=p.mode||'Cash';
+    push(mode,{date:p.date,desc:`${custName} — ${mode} payment`,type:'Credit Recovery',ref:p.referenceNo||'',in:p.amount||0,out:0,createdAt:p.createdAt},'Credit Recovery');
   }
 
-  // 4. Loans received — any mode, including Cash
+  // 3. Loans received — any mode
   for(const l of Object.values(loanMap)){
     if(l.startDate<fromDate||l.startDate>toDate)continue;
-    rows.push({date:l.startDate,desc:`${l.lenderName||'Lender'} — loan disbursement`,type:'Loan Received',ref:'',in:l.principalAmount||0,out:0,createdAt:l.createdAt});
-    stats.loanIn+=l.principalAmount||0;stats.totalIn+=l.principalAmount||0;
+    const mode=l.receivedVia||'Bank Transfer';
+    push(mode,{date:l.startDate,desc:`${l.lenderName||'Lender'} — loan disbursement`,type:'Loan Received',ref:'',in:l.principalAmount||0,out:0,createdAt:l.createdAt},'Loan Received');
   }
 
-  // 5. Loan repayments — ALL modes post to the bank directly now (Expenses,
-  // Cash Advances, Loan Repayments and Purchases are treated as bank
-  // transactions regardless of Cash/Bank Transfer/UPI/Cheque — they no
-  // longer net against the till via Daily Settlement).
-  const repayKeys=DB.listActive('pbms_loan_repayment_');
-  for(const r of repayKeys){
+  // 4. Loan repayments — any mode
+  for(const r of DB.listActive('pbms_loan_repayment_')){
     if(!r||r.date<fromDate||r.date>toDate)continue;
+    const mode=r.mode||'Cash';
     const lenderName=loanMap[r.loanId]?.lenderName||r.lenderName||'Lender';
-    rows.push({date:r.date,desc:`${lenderName} — ${r.remarks||'repayment'}${r.referenceNo?' · '+r.referenceNo:''}`,type:'Loan Repaid',ref:r.referenceNo||'',in:0,out:r.amount||0,createdAt:r.createdAt});
-    stats.loanOut+=r.amount||0;stats.totalOut+=r.amount||0;
+    push(mode,{date:r.date,desc:`${lenderName} — ${r.remarks||'repayment'}${r.referenceNo?' · '+r.referenceNo:''}`,type:'Loan Repaid',ref:r.referenceNo||'',in:0,out:r.amount||0,createdAt:r.createdAt},'Loan Repaid');
   }
 
-  // 6. Cash advances — any mode posts to the bank directly.
-  const caKeys=DB.listActive('pbms_credit_sale_');
-  for(const cs of caKeys){
+  // 5. Cash advances to customers — any mode (field is `givenVia`)
+  for(const cs of DB.listActive('pbms_credit_sale_')){
     if(cs.date<fromDate||cs.date>toDate)continue;
     if(cs.saleType!=='CashAdvance')continue;
-    rows.push({date:cs.date,desc:`${cs.customerName||'Customer'} — cash advance${cs.note?' · '+cs.note:''}`,type:'Cash Advance Out',ref:cs.referenceNo||'',in:0,out:cs.amount||0,createdAt:cs.createdAt});
-    stats.advanceOut+=cs.amount||0;stats.totalOut+=cs.amount||0;
+    const mode=cs.givenVia||'Cash';
+    push(mode,{date:cs.date,desc:`${cs.customerName||'Customer'} — cash advance${cs.note?' · '+cs.note:''}`,type:'Cash Advance Out',ref:cs.referenceNo||'',in:0,out:cs.amount||0,createdAt:cs.createdAt},'Cash Advance Out');
   }
 
-  // 7. Paid fuel purchases — any mode posts to the bank directly — dated by the
-  // actual payment date, not the invoice/purchase date, so settling an old credit
-  // purchase doesn't retroactively rewrite an already-closed month's balance.
-  // payments[] holds each individual cash-out event (any mode) — a Partial invoice
-  // now posts whatever was actually paid instead of showing nothing until the whole
-  // invoice is settled. Legacy records saved before this existed (a single paidDate/
-  // mode with no breakdown) fall back to one row on their old paid date.
-  const purKeys=DB.listActive('pbms_purchase_');const pending=[];
-  for(const p of purKeys){
+  // 6. Paid fuel purchases — any mode, dated by the actual payment date.
+  // payments[] holds each individual cash-out event — a Partial invoice
+  // posts whatever was actually paid so far. Legacy records saved before
+  // payments[] existed fall back to one row on their old paid date.
+  for(const p of DB.listActive('pbms_purchase_')){
     if(!p)continue;
     const pays=p.payments&&p.payments.length?p.payments
       :(p.paymentStatus==='Paid'&&(p.invoiceAmount||0)>0?[{date:p.paidDate||p.date,amount:p.invoiceAmount,mode:p.mode,createdAt:p.createdAt}]:[]);
     for(const pay of pays){
       if(!pay||pay.date<fromDate||pay.date>toDate||(pay.amount||0)<=0)continue;
-      rows.push({date:pay.date,desc:`${p.supplierName||'Supplier'} — ${p.product} ${fmt.litres(p.quantity||0)}${p.invoiceNo?' · '+p.invoiceNo:''}`,type:'Fuel Payment',ref:p.invoiceNo||'',in:0,out:pay.amount,createdAt:pay.createdAt||p.createdAt});
-      stats.fuelOut+=pay.amount;stats.totalOut+=pay.amount;
+      push(pay.mode,{date:pay.date,desc:`${p.supplierName||'Supplier'} — ${p.product} ${fmt.litres(p.quantity||0)}${p.invoiceNo?' · '+p.invoiceNo:''}`,type:'Fuel Payment',ref:p.invoiceNo||'',in:0,out:pay.amount,createdAt:pay.createdAt||p.createdAt},'Fuel Payment');
     }
     const paidSoFar=p.paidAmount!=null?p.paidAmount:(p.paymentStatus==='Paid'?(p.invoiceAmount||0):0);
     const due=round2((p.invoiceAmount||0)-paidSoFar);
     if(due>0.004&&p.date>=fromDate&&p.date<=toDate)pending.push({...p,dueAmount:due});
   }
 
-  // 8. Oil/lube paid purchases (outflow) — any mode, one row per actual payment date
-  const olKeys=DB.listActive('pbms_oil_purchase_');
-  for(const p of olKeys){
+  // 7. Oil/lube paid purchases — any mode, one row per actual payment date
+  for(const p of DB.listActive('pbms_oil_purchase_')){
     if(!p)continue;
-    // payments[] holds each cash-out event; legacy records (pre-fix) only have a
-    // cumulative paidAmount with no dated breakdown, so fall back to one row on
-    // the purchase date for those.
     const pays=p.payments&&p.payments.length?p.payments:((p.paidAmount||0)>0?[{date:p.date,amount:p.paidAmount}]:[]);
     for(const pay of pays){
       if(!pay||pay.date<fromDate||pay.date>toDate||(pay.amount||0)<=0)continue;
-      rows.push({date:pay.date,desc:`${p.supplier||'Oil/Lube'} — oil purchase${p.remarks?' ('+p.remarks+')':''}`,type:'Oil Payment',ref:'',in:0,out:pay.amount,createdAt:pay.createdAt||p.createdAt});
-      stats.oilOut+=pay.amount;stats.totalOut+=pay.amount;
+      push(pay.mode,{date:pay.date,desc:`${p.supplier||'Oil/Lube'} — oil purchase${p.remarks?' ('+p.remarks+')':''}`,type:'Oil Payment',ref:'',in:0,out:pay.amount,createdAt:pay.createdAt||p.createdAt},'Oil Payment');
     }
   }
 
-  // 9. Expenses (outflow) — any mode
-  const expKeys=DB.listActive('pbms_expense_');
-  for(const e of expKeys){
+  // 8. Expenses — any mode
+  for(const e of DB.listActive('pbms_expense_')){
     if(!e||e.date<fromDate||e.date>toDate)continue;
-    rows.push({date:e.date,desc:`${e.description||'Expense'} (${e.category})`,type:'Expense',ref:'',in:0,out:e.amount||0,createdAt:e.createdAt});
-    stats.expOut+=e.amount||0;stats.totalOut+=e.amount||0;
+    push(e.mode,{date:e.date,desc:`${e.description||'Expense'} (${e.category})`,type:'Expense',ref:'',in:0,out:e.amount||0,createdAt:e.createdAt},'Expense');
   }
 
-  // 9b. Shop (retail) purchase payments — any mode touches the bank
-  const shopPurKeys=listShopPurchases();
-  for(const p of shopPurKeys){
+  // 9. Shop (retail) purchase payments — any mode
+  for(const p of listShopPurchases()){
     if(!p||!p.payments)continue;
     for(const pay of p.payments){
       if(!pay||pay.date<fromDate||pay.date>toDate||(pay.amount||0)<=0)continue;
-      rows.push({date:pay.date,desc:`Shop purchase — ${p.ref||''} (${pay.mode||'Cash'})`,type:'Shop Payment',ref:p.ref||'',in:0,out:pay.amount,createdAt:pay.createdAt||p.createdAt});
-      stats.shopOut=(stats.shopOut||0)+pay.amount;stats.totalOut+=pay.amount;
+      push(pay.mode,{date:pay.date,desc:`Shop purchase — ${p.ref||''}`,type:'Shop Payment',ref:p.ref||'',in:0,out:pay.amount,createdAt:pay.createdAt||p.createdAt},'Shop Payment');
     }
   }
 
-  // 9c. Shop (retail) sale payments recorded against credit invoices — any
-  // mode, including Cash. Only the 2nd+ payment on an invoice is handled
-  // here; the 1st payment (at billing time) is already in section 2 above.
-  const shopSaleKeys=listShopSales();
-  for(const s of shopSaleKeys){
+  // 10. Shop (retail) sale payments recorded against credit invoices —
+  // any mode. Only the 2nd+ payment on an invoice lands here; the 1st
+  // payment (at billing time) is already in section 1 above.
+  for(const s of listShopSales()){
     if(!s||!s.payments||s.payments.length<2)continue;
     for(let i=1;i<s.payments.length;i++){
       const pay=s.payments[i];
       if(!pay||pay.date<fromDate||pay.date>toDate||(pay.amount||0)<=0)continue;
-      rows.push({date:pay.date,desc:`Shop invoice ${s.invoiceNo||''} — credit recovery (${pay.mode||'Cash'})`,type:'Shop Recovery',ref:s.invoiceNo||'',in:pay.amount,out:0,createdAt:pay.createdAt||s.createdAt});
-      stats.shopIn=(stats.shopIn||0)+pay.amount;stats.totalIn+=pay.amount;
+      push(pay.mode,{date:pay.date,desc:`Shop invoice ${s.invoiceNo||''} — credit recovery`,type:'Shop Recovery',ref:s.invoiceNo||'',in:pay.amount,out:0,createdAt:pay.createdAt||s.createdAt},'Shop Recovery');
     }
   }
 
-  // 10. Incentive dues (inflow — company incentives) — any mode, including Cash
+  // 11. Incentive dues received — any mode (field is `receivedVia`)
   for(const d of DB.listActive('pbms_incentive_due_')){
     if(!d||d.date<fromDate||d.date>toDate)continue;
-    rows.push({date:d.date,desc:`Incentive — ${d.name}`,type:'Incentive',ref:'',in:d.amount||0,out:0,createdAt:d.createdAt});
-    stats.incentiveDueIn+=d.amount||0;stats.totalIn+=d.amount||0;
+    const mode=d.receivedVia||'Bank Transfer';
+    push(mode,{date:d.date,desc:`Incentive — ${d.name}`,type:'Incentive',ref:'',in:d.amount||0,out:0,createdAt:d.createdAt},'Incentive');
   }
 
-  rows.sort((a,b)=>(a.date||'').localeCompare(b.date||'')||(a.type==='Opening'?-1:0));
-  let bal=stats.openingBalance;
-  rows.forEach(r=>{if(r.type!=='Opening'){bal=round2(bal+r.in-r.out);}r.balance=r.type==='Opening'?r.in:bal;});
-  return{rows,stats,pending};
+  return{cashRows,bankRows,cashStats,bankStats,pending};
 }
 
-async function downloadBankBookExcel(){
+function emptyStats(){return{openingBalance:0,totalIn:0,totalOut:0,inBreakdown:{},outBreakdown:{}};}
+
+// ────────────────────────────────────────────────────
+// MANUAL (MAN) ROWS — deposits/withdrawals (Transfer) and any other
+// manual entry a person records directly against a book.
+// ────────────────────────────────────────────────────
+
+function buildManualRows(book,fromDate,toDate){
+  const cfg=LEDGER_BOOKS[book];
+  const rows=[];
+  for(const k of DB.listActive(cfg.txPrefix)){
+    if(!k||k.date<fromDate||k.date>toDate)continue;
+    const type=k.transferId?(k.direction==='in'?'Transfer In':'Transfer Out'):k.category;
+    rows.push({id:k.id,date:k.date,desc:k.desc||k.category,type,ref:k.ref||'',
+      in:k.direction==='in'?k.amount:0,out:k.direction==='out'?k.amount:0,
+      createdAt:k.createdAt,manual:true,transferId:k.transferId||null});
+  }
+  return rows;
+}
+
+function buildLedger(book,fromDate,toDate){
+  const cfg=LEDGER_BOOKS[book];
+  const{cashRows,bankRows,cashStats,bankStats,pending}=computeAutoRows(fromDate,toDate);
+  const autoRows=book==='cash'?cashRows:bankRows;
+  const stats=book==='cash'?cashStats:bankStats;
+  const manualRows=buildManualRows(book,fromDate,toDate);
+  for(const m of manualRows){
+    const bucket=m.in>0?stats.inBreakdown:stats.outBreakdown;
+    bucket[m.type]=(bucket[m.type]||0)+(m.in>0?m.in:m.out);
+    if(m.in>0)stats.totalIn+=m.in; else stats.totalOut+=m.out;
+  }
+  const ob=DB.get(cfg.openingKey);
+  let rows=[...autoRows,...manualRows];
+  if(ob){
+    rows.push({date:ob.asOfDate,desc:'Opening balance',type:'Opening',ref:'',in:ob.amount,out:0,createdAt:ob.asOfDate});
+    stats.openingBalance=ob.amount;
+  }
+  rows.sort((a,b)=>(a.date||'').localeCompare(b.date||'')||(a.type==='Opening'?-1:0)||(a.createdAt||'').localeCompare(b.createdAt||''));
+  let bal=stats.openingBalance;
+  rows.forEach(r=>{if(r.type!=='Opening'){bal=round2(bal+r.in-r.out);}r.balance=r.type==='Opening'?r.in:bal;});
+  return{rows,stats,pending:book==='bank'?pending:[]};
+}
+
+// ────────────────────────────────────────────────────
+// MANUAL ENTRY — add/edit/delete
+// ────────────────────────────────────────────────────
+
+function showManualEntryModal(book,editId){
+  const cfg=LEDGER_BOOKS[book];
+  const existing=editId?DB.getActive(`${cfg.txPrefix}${editId}`):null;
+  if(editId&&!existing){toast('Entry not found','error');return;}
+  const today=fmt.today();
+  const allCats=[...cfg.inCats,...cfg.outCats];
+  showModal(`<div class="p-6">
+    <div class="flex items-center justify-between mb-5">
+      <h2 class="text-lg font-bold text-slate-800">${editId?'Edit':'Add'} ${cfg.label} Manual Entry</h2>
+      <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600">✕</button>
+    </div>
+    <div class="grid grid-cols-2 gap-4 mb-3">
+      <div><label class="form-label text-xs">Date</label><input type="date" id="me-date" class="form-input text-sm" value="${existing?.date||today}" max="${today}"></div>
+      <div><label class="form-label text-xs">Direction</label>
+        <select id="me-dir" class="form-input text-sm" onchange="updateManualEntryCats('${book}')">
+          <option value="in" ${existing?.direction==='in'?'selected':''}>Money In</option>
+          <option value="out" ${(!existing||existing?.direction==='out')?'selected':''}>Money Out</option>
+        </select></div>
+      <div class="col-span-2"><label class="form-label text-xs">Category</label>
+        <select id="me-cat" class="form-input text-sm">${allCats.map(c=>`<option ${existing?.category===c?'selected':''}>${c}</option>`).join('')}</select></div>
+      <div><label class="form-label text-xs">Amount ₹</label><input type="number" id="me-amt" class="form-input text-sm text-right font-mono" step="0.01" min="0.01" value="${existing?.amount||''}" placeholder="0.00"></div>
+      <div><label class="form-label text-xs">Reference</label><input type="text" id="me-ref" class="form-input text-sm" value="${(existing?.ref||'').replace(/"/g,'&quot;')}" placeholder="Optional"></div>
+      <div class="col-span-2"><label class="form-label text-xs">Description</label><input type="text" id="me-desc" class="form-input text-sm" value="${(existing?.desc||'').replace(/"/g,'&quot;')}" placeholder="Optional note"></div>
+    </div>
+    <div class="flex justify-end gap-3 pt-3 border-t border-slate-100">
+      <button onclick="closeModal()" class="btn btn-ghost">Cancel</button>
+      <button onclick="saveManualEntry('${book}','${editId||''}')" class="btn btn-primary">${editId?'Save Changes':'+ Add Entry'}</button>
+    </div>
+  </div>`,()=>loadCashTab(APP.tabs?.cash||'cashbook'));
+  setTimeout(()=>updateManualEntryCats(book,existing?.direction),50);
+}
+
+function updateManualEntryCats(book,forceDir){
+  const cfg=LEDGER_BOOKS[book];
+  const dir=forceDir||document.getElementById('me-dir')?.value||'in';
+  const cats=dir==='in'?cfg.inCats:cfg.outCats;
+  const sel=document.getElementById('me-cat');if(!sel)return;
+  const cur=sel.value;
+  sel.innerHTML=cats.map(c=>`<option ${cur===c?'selected':''}>${c}</option>`).join('');
+}
+
+async function saveManualEntry(book,editId){
+  const cfg=LEDGER_BOOKS[book];
+  const date=document.getElementById('me-date')?.value;
+  const direction=document.getElementById('me-dir')?.value||'in';
+  const category=document.getElementById('me-cat')?.value;
+  const amount=parseFloat(document.getElementById('me-amt')?.value)||0;
+  const ref=document.getElementById('me-ref')?.value?.trim()||'';
+  const desc=document.getElementById('me-desc')?.value?.trim()||category;
+  if(!date){toast('Select a date','error');return;}
+  if(amount<=0){toast('Enter a valid amount','error');return;}
+  const id=editId||`MAN-${Date.now()}`;
+  const existing=editId?DB.get(`${cfg.txPrefix}${id}`):{};
+  const record={id,book,date,direction,category,amount,ref,desc,createdAt:existing?.createdAt||new Date().toISOString()};
+  if(editId){
+    record.editHistory=[...(existing.editHistory||[]),{editedAt:new Date().toISOString(),
+      before:{date:existing.date,direction:existing.direction,category:existing.category,amount:existing.amount,ref:existing.ref,desc:existing.desc}}];
+  }
+  DB.set(`${cfg.txPrefix}${id}`,record);
+  await Audit.log(editId?'ledger_manual_entry_edited':'ledger_manual_entry_added',book==='cash'?'cashbook':'bankbook',id,{date,direction,category,amount});
+  toast(`${cfg.label} entry ${editId?'updated':'added'}`,'success');
+  closeModal();
+  await loadCashTab(APP.tabs?.cash||'cashbook');
+}
+
+function editManualEntry(book,id){
+  requirePIN('Editing a manual ledger entry requires manager approval',()=>showManualEntryModal(book,id));
+}
+
+function deleteManualEntry(book,id){
+  requirePIN('Deleting a manual ledger entry requires manager approval',()=>{
+    const cfg=LEDGER_BOOKS[book];
+    showConfirm('Delete Entry','This removes the manual entry from the ledger. This is recorded in the audit log.',async()=>{
+      const rec=DB.get(`${cfg.txPrefix}${id}`);
+      if(rec)DB.set(`${cfg.txPrefix}${id}`,{...rec,deleted:true,deletedAt:new Date().toISOString(),deletedBy:APP.userEmail||'Manager'});
+      await Audit.log('ledger_manual_entry_deleted',book==='cash'?'cashbook':'bankbook',id,{date:rec?.date,category:rec?.category,amount:rec?.amount});
+      toast('Entry deleted','success');
+      await loadCashTab(APP.tabs?.cash||'cashbook');
+    },'Delete');
+  });
+}
+
+// ────────────────────────────────────────────────────
+// TRANSFER — the only link between Cash Book and Bank Book.
+// Writes a linked pair of manual entries (one per book) sharing a
+// transferId, so they're always shown/deleted together.
+// ────────────────────────────────────────────────────
+
+function showTransferModal(defaultDir){
+  const today=fmt.today();
+  showModal(`<div class="p-6">
+    <div class="flex items-center justify-between mb-5">
+      <h2 class="text-lg font-bold text-slate-800">⇄ Transfer Cash ↔ Bank</h2>
+      <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600">✕</button>
+    </div>
+    <div class="grid grid-cols-2 gap-4 mb-3">
+      <div class="col-span-2"><label class="form-label text-xs">Direction</label>
+        <select id="tr-dir" class="form-input text-sm">
+          <option value="toBank" ${defaultDir==='toBank'?'selected':''}>Deposit Cash → Bank</option>
+          <option value="toCash" ${defaultDir==='toCash'?'selected':''}>Withdraw Bank → Cash</option>
+        </select></div>
+      <div><label class="form-label text-xs">Date</label><input type="date" id="tr-date" class="form-input text-sm" value="${today}" max="${today}"></div>
+      <div><label class="form-label text-xs">Amount ₹</label><input type="number" id="tr-amt" class="form-input text-sm text-right font-mono" step="0.01" min="0.01" placeholder="0.00"></div>
+      <div><label class="form-label text-xs">Reference</label><input type="text" id="tr-ref" class="form-input text-sm" placeholder="Slip / txn no. (optional)"></div>
+      <div><label class="form-label text-xs">Remarks</label><input type="text" id="tr-rem" class="form-input text-sm" placeholder="Optional"></div>
+    </div>
+    <div class="flex justify-end gap-3 pt-3 border-t border-slate-100">
+      <button onclick="closeModal()" class="btn btn-ghost">Cancel</button>
+      <button onclick="saveTransfer()" class="btn btn-primary">Record Transfer</button>
+    </div>
+  </div>`,()=>loadCashTab(APP.tabs?.cash||'cashbook'));
+}
+
+function saveTransfer(){
+  requirePIN('Recording a cash ↔ bank transfer requires manager approval',async()=>{
+    const dir=document.getElementById('tr-dir')?.value||'toBank';
+    const date=document.getElementById('tr-date')?.value;
+    const amount=parseFloat(document.getElementById('tr-amt')?.value)||0;
+    const ref=document.getElementById('tr-ref')?.value?.trim()||'';
+    const rem=document.getElementById('tr-rem')?.value?.trim()||'';
+    if(!date){toast('Select a date','error');return;}
+    if(amount<=0){toast('Enter a valid amount','error');return;}
+    const transferId=`TRF-${Date.now()}`;
+    const createdAt=new Date().toISOString();
+    if(dir==='toBank'){
+      DB.set(`pbms_cashbook_tx_${transferId}-c`,{id:`${transferId}-c`,book:'cash',date,direction:'out',category:'Deposit to Bank',amount,ref,desc:rem||'Cash deposited to bank',transferId,createdAt});
+      DB.set(`pbms_bankbook_tx_${transferId}-b`,{id:`${transferId}-b`,book:'bank',date,direction:'in',category:'Cash Deposit',amount,ref,desc:rem||'Cash deposit from till',transferId,createdAt});
+    } else {
+      DB.set(`pbms_bankbook_tx_${transferId}-b`,{id:`${transferId}-b`,book:'bank',date,direction:'out',category:'Cash Withdrawal',amount,ref,desc:rem||'Cash withdrawn from bank',transferId,createdAt});
+      DB.set(`pbms_cashbook_tx_${transferId}-c`,{id:`${transferId}-c`,book:'cash',date,direction:'in',category:'Withdrawn from Bank',amount,ref,desc:rem||'Cash withdrawn from bank',transferId,createdAt});
+    }
+    await Audit.log('ledger_transfer_added','transfer',transferId,{direction:dir,date,amount,ref});
+    toast(`Transfer of ${fmt.currency(amount)} recorded`,'success');
+    closeModal();
+    await loadCashTab(APP.tabs?.cash||'cashbook');
+  });
+}
+
+function deleteTransfer(transferId){
+  requirePIN('Deleting a transfer requires manager approval',()=>{
+    showConfirm('Delete Transfer','This removes BOTH sides of the transfer (Cash Book and Bank Book) and is recorded in the audit log.',async()=>{
+      const deletedAt=new Date().toISOString();const deletedBy=APP.userEmail||'Manager';
+      const cKey=`pbms_cashbook_tx_${transferId}-c`,bKey=`pbms_bankbook_tx_${transferId}-b`;
+      const cRec=DB.get(cKey),bRec=DB.get(bKey);
+      if(cRec)DB.set(cKey,{...cRec,deleted:true,deletedAt,deletedBy});
+      if(bRec)DB.set(bKey,{...bRec,deleted:true,deletedAt,deletedBy});
+      await Audit.log('ledger_transfer_deleted','transfer',transferId,{amount:cRec?.amount||bRec?.amount,date:cRec?.date||bRec?.date});
+      toast('Transfer deleted','success');
+      await loadCashTab(APP.tabs?.cash||'cashbook');
+    },'Delete');
+  });
+}
+
+// ────────────────────────────────────────────────────
+// EXPORTS
+// ────────────────────────────────────────────────────
+
+function downloadLedgerExcel(book){
   if(typeof XLSX==='undefined'){toast('Excel library not loaded','error');return;}
-  const month=APP.tabs?.bbMonth;if(!month)return;
+  const cfg=LEDGER_BOOKS[book];
+  const month=APP.tabs?.[ledgerMonthKey(book)];if(!month)return;
   const[y,m]=month.split('-');
   const fromDate=`${month}-01`;
   const lastDay=new Date(parseInt(y),parseInt(m),0).getDate();
   const toDate=`${month}-${String(lastDay).padStart(2,'0')}`;
-  const{rows}=await buildBankBook(fromDate,toDate);
-  const data=rows.map(r=>({'Date':fmt.date(r.date),'Description':r.desc,'Type':r.type,
+  const{rows}=buildLedger(book,fromDate,toDate);
+  const data=rows.map(r=>({'Date':fmt.date(r.date),'Description':r.desc,'Type':r.type,'Source':r.type==='Opening'?'—':(r.manual?'Manual':'Auto'),
     'Ref':r.ref||'','In ₹':r.in||0,'Out ₹':r.out||0,'Balance ₹':r.balance}));
   const ws=XLSX.utils.json_to_sheet(data);
-  ws['!cols']=[{wch:12},{wch:40},{wch:16},{wch:14},{wch:14},{wch:14},{wch:14}];
-  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Bank Book');
-  XLSX.writeFile(wb,`Bank_Book_${month}.xlsx`);
-  toast('Bank Book downloaded','success');
-  document.getElementById('bb-dl-menu')?.classList.add('hidden');
+  ws['!cols']=[{wch:12},{wch:40},{wch:18},{wch:10},{wch:14},{wch:14},{wch:14},{wch:14}];
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,cfg.label);
+  XLSX.writeFile(wb,`${cfg.label.replace(/\s+/g,'_')}_${month}.xlsx`);
+  toast(`${cfg.label} downloaded`,'success');
+  document.getElementById(`${book}-dl-menu`)?.classList.add('hidden');
 }
-function downloadBankBookPDF(){
-  const prev=document.title;document.title=`Bank Book — ${formatMonth(APP.tabs?.bbMonth)}`;
+function downloadLedgerPDF(book){
+  const cfg=LEDGER_BOOKS[book];
+  const prev=document.title;document.title=`${cfg.label} — ${formatMonth(APP.tabs?.[ledgerMonthKey(book)])}`;
   window.print();document.title=prev;
-  document.getElementById('bb-dl-menu')?.classList.add('hidden');
+  document.getElementById(`${book}-dl-menu`)?.classList.add('hidden');
 }
-
-
-
-
-
-
 
 // ====================================================
 // PAGE 7: EXPENSES
@@ -6926,14 +6997,15 @@ function computeDailyReportData(date){
     loanRepayRows.push({...r,lenderName:loansForRepay[r.loanId]?.lenderName||r.lenderName||'—'});}}
 
   // ── 6. CASH & BANKING ──
-  const bankKeys=DB.listKeys('pbms_bank_tx_');
+  // Cash↔Bank transfers on this date (the linked manual entries written
+  // by saveTransfer() — see LEDGER_BOOKS / showTransferModal). Read from
+  // the bank-side leg only, since every transfer has exactly one.
   let bankDeposit=0,bankWithdraw=0;
-  for(const k of bankKeys){const b=DB.get(k);if(b&&b.date===date){
-    if(b.type==='deposit')bankDeposit+=(b.amount||0);
+  for(const b of DB.listActive('pbms_bankbook_tx_')){
+    if(!b||!b.transferId||b.date!==date)continue;
+    if(b.direction==='in')bankDeposit+=(b.amount||0);
     else bankWithdraw+=(b.amount||0);
-  }}
-  const depKeys=DB.listKeys('pbms_deposit_');
-  for(const k of depKeys){const d=DB.get(k);if(d&&d.date===date)bankDeposit+=(d.amount||0);}
+  }
 
   // ── 7. CREDIT PAYMENTS RECEIVED ──
   // cpRows carries the customer name per payment (looked up from the
@@ -7604,7 +7676,7 @@ async function loadMonthlyReport(monthStr){
     dayStats[settleDate].se+=s.shortageExcess||0;
   }
   // Cash deposits — computed directly from settled sessions + shop cash
-  // sales (same logic as buildBankBook's Cash Deposit row), not from saved
+  // sales (same logic as computeAutoRows' Cash Deposit row), not from saved
   // Daily Settlement records — Daily Bank Book no longer creates those,
   // since everything posts automatically now. Keyed by settlement date
   // (the day cash was actually counted/bankable), not check-in date.
@@ -8950,7 +9022,12 @@ function validateAndSanitizeBackup(records){
   if(!records.pbms_settings)throw new Error('Missing station settings — not a valid NexBunk backup');
   // Exact-match keys that aren't prefix-based (single kvstore records rather
   // than per-record collections).
-  const allowedExactKeys=new Set(['pbms_settings','pbms_bank_balance','pbms_bank_opening_balance',
+  const allowedExactKeys=new Set(['pbms_settings',
+    // Legacy single-ledger keys — no longer written, but still accepted so an
+    // old backup taken before the Cash Book/Bank Book rebuild can still be restored.
+    'pbms_bank_balance','pbms_bank_opening_balance',
+    // Cash Book / Bank Book opening balances (rebuilt module)
+    'pbms_cashbook_opening','pbms_bankbook_opening',
     'pbms_last_backup','auditArchiveAnchor']);
   const allowedPrefixes=[
     'pbms_staff_','pbms_session_','pbms_credit_sale_',
@@ -8959,6 +9036,9 @@ function validateAndSanitizeBackup(records){
     'pbms_daily_settlement_','pbms_opening_stock_','pbms_aggregate_',
     'pbms_incentive_due_','pbms_oil_purchase_','pbms_attend_',
     'pbms_audit_',
+    // Cash Book / Bank Book manual entries (rebuilt module — see
+    // LEDGER_BOOKS, buildManualRows, saveManualEntry, saveTransfer)
+    'pbms_cashbook_tx_','pbms_bankbook_tx_',
     // Shop Billing & Inventory module (retail/GST invoicing, added later —
     // must stay in sync with shopProductKey/shopPartyKey/shopSaleKey/shopPurchaseKey)
     'shop_product_','shop_party_','shop_sale_','shop_purchase_'
@@ -9415,32 +9495,26 @@ async function seedDemoData(){
   for(const e of expenses)DB.set(`pbms_expense_${e.id}`,e);
 
   // ============================================================
-  // CASH & BANKING SEED DATA — simplified 2-tab format
+  // CASH & BANKING SEED DATA — Cash Book + Bank Book (rebuilt module)
   // ============================================================
 
-  // Bank opening balance
-  DB.set('pbms_bank_opening_balance',{amount:120000,asOfDate:d(30)});
+  // Cash Book & Bank Book opening balances (cutover date) — everything
+  // from this date onward is reconstructed live from the seeded sessions,
+  // shop sales, credit/loan/expense/purchase records above, split by
+  // their own payment mode (see computeAutoRows). Nothing else to seed
+  // here — there's no separate "daily settlement" record anymore.
+  DB.set('pbms_cashbook_opening',{amount:15000,asOfDate:d(30)});
+  DB.set('pbms_bankbook_opening',{amount:120000,asOfDate:d(30)});
 
-  // Daily settlements for last 7 settled days
-  // cashCollection, upiCollection, cardCollection derived from recentSessions above
-  // Use approximate session cash amounts matching recentSessions seed
-  const settlCash=[75850,68300,70200,71700,69500,65100,61500];
-  const settlUpi =[9600, 9000, 9000, 9000, 9000,10000,10000];
-  const settlCard=[5000, 5000, 5000, 5000, 5000, 5000, 5000];
-  const settlCred=[1250, 2000, 1300, 1847, 1300, 1997, 1847];
-  for(let i=0;i<7;i++){
-    const date=d(7-i);
-    const cashColl=settlCash[i],upiColl=settlUpi[i],cardColl=settlCard[i],creditS=settlCred[i];
-    const total=cashColl+upiColl+cardColl+creditS;
-    DB.set(`pbms_daily_settlement_${date}`,{
-      date,cashCollection:cashColl,upiCollection:upiColl,cardCollection:cardColl,
-      creditSales:creditS,totalCollected:total,
-      cashDepositToBank:cashColl,totalBankInflowToday:cashColl+upiColl+cardColl
-    });
-  }
-
-  // Expenses seeded above (see `expenses` array) post to the Bank Book
-  // directly regardless of mode — no separate cash-expense netting needed.
+  // One sample manual transfer, showing how cash collected at the pump
+  // gets physically deposited into the bank a few days later.
+  const seedTransferId=`TRF-SEED-${d(5)}`;
+  DB.set(`pbms_cashbook_tx_${seedTransferId}-c`,{id:`${seedTransferId}-c`,book:'cash',date:d(5),
+    direction:'out',category:'Deposit to Bank',amount:50000,ref:'',desc:'Cash deposited to bank',
+    transferId:seedTransferId,createdAt:new Date().toISOString()});
+  DB.set(`pbms_bankbook_tx_${seedTransferId}-b`,{id:`${seedTransferId}-b`,book:'bank',date:d(5),
+    direction:'in',category:'Cash Deposit',amount:50000,ref:'',desc:'Cash deposit from till',
+    transferId:seedTransferId,createdAt:new Date().toISOString()});
 
   // Attendance (7 days)
   const attStaff=['EMP001','EMP002','EMP003','EMP004','EMP005'];
