@@ -2394,8 +2394,12 @@ async function showCheckInModal(){
           <option value="">Select employee...</option>
           ${staff.map(s=>`<option value="${s.id}" data-name="${s.name}">${s.name} — ${s.role}</option>`).join('')}
         </select></div>
-      <div><label class="form-label">Check-in Time</label>
-        <input type="time" id="ci-time" class="form-input" value="${new Date().toTimeString().slice(0,5)}"></div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="form-label">Check-in Date</label>
+          <input type="date" id="ci-date" class="form-input" value="${fmt.today()}" max="${fmt.today()}"></div>
+        <div><label class="form-label">Check-in Time</label>
+          <input type="time" id="ci-time" class="form-input" value="${new Date().toTimeString().slice(0,5)}"></div>
+      </div>
       <div><label class="form-label">Assign Nozzles * (select at least one)</label>
         <div class="grid grid-cols-2 gap-2 mt-1">
           ${nozzles.map(n=>`<label class="flex items-center gap-2 p-2 border border-slate-200 rounded-lg cursor-pointer hover:bg-slate-50">
@@ -2454,7 +2458,8 @@ async function doCheckIn(){
     nozzles.push({nozzleId:cb.value,nozzleName:cb.dataset.name,product:prod,openingReading:opening,closingReading:null,testLitres:0,netSale:null,rate,amount:null});
   }
   if(!valid)return;
-  const today=fmt.today();
+  const dateVal=document.getElementById('ci-date')?.value;
+  const today=dateVal||fmt.today();
   const timeStr=timeVal?new Date(`2000-01-01T${timeVal}`).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):fmt.nowTime();
   const sessId=`${empId}-${Date.now()}`;
   const session={id:sessId,employeeId:empId,employeeName:empName,checkInDate:today,checkInTime:timeStr,
@@ -3051,6 +3056,18 @@ async function showStaffEditModal(empId,from,to){
   </div>`);
 }
 
+// Converts a stored 12-hour display time ("02:30 PM") into the 24-hour
+// "HH:MM" value an <input type="time"> needs. Used when re-opening the
+// Edit Session modal so the check-in time field shows correctly.
+function to24Hr(t){
+  if(!t)return'';
+  const m=t.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if(!m)return'';
+  let h=parseInt(m[1],10);const min=m[2];const ap=m[3].toUpperCase();
+  if(ap==='PM'&&h!==12)h+=12;
+  if(ap==='AM'&&h===12)h=0;
+  return`${String(h).padStart(2,'0')}:${min}`;
+}
 async function showSingleSessionEdit(sessId,origin='staffreport'){
   const sess=DB.get(`pbms_session_${sessId}`);if(!sess)return;
   const settings=APP.settings||{};
@@ -3099,8 +3116,14 @@ async function showSingleSessionEdit(sessId,origin='staffreport'){
     <div class="flex items-center justify-between mb-4">
       <div>
         <h2 class="text-base font-bold text-slate-800">Edit Session — ${sess.employeeName}</h2>
-        <p class="text-xs text-slate-500">${fmt.date(sess.checkInDate)} · ${sess.checkInTime||''}→${sess.checkOutTime||''}
-          ${editCount>0?` · <span class="text-amber-600">✏ Edited ${editCount}×</span>`:''}</p>
+        <div class="flex items-center gap-2 mt-1.5">
+          <label class="text-xs text-slate-500">Check-in Date</label>
+          <input type="date" id="se-checkin-date" class="form-input text-xs py-1" style="width:140px" value="${sess.checkInDate||''}" max="${fmt.today()}">
+          <label class="text-xs text-slate-500">Time</label>
+          <input type="time" id="se-checkin-time" class="form-input text-xs py-1" style="width:110px" value="${to24Hr(sess.checkInTime)}">
+          ${editCount>0?`<span class="text-amber-600 text-xs">✏ Edited ${editCount}×</span>`:''}
+        </div>
+        ${sess.checkOutTime?`<p class="text-xs text-slate-400 mt-1">Checked out: ${sess.checkOutDate?fmt.date(sess.checkOutDate):fmt.date(sess.checkInDate)} · ${sess.checkOutTime}</p>`:''}
       </div>
       <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">✕</button>
     </div>
@@ -3146,7 +3169,7 @@ async function showSingleSessionEdit(sessId,origin='staffreport'){
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
             d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
         </svg>
-        <span><strong>Warning:</strong> ${sess.status==='Settled'?'You are editing a settled shift. All changes are recorded in the audit log. This action affects the staff report, daily settlement, and P&amp;L for this date.':'This shift is handed over and awaiting cash settlement. Changes are recorded in the audit log and will carry through once settled.'}</span>
+        <span><strong>Warning:</strong> ${sess.status==='Settled'?'You are editing a settled shift. All changes are recorded in the audit log. This action affects the staff report, daily settlement, and P&amp;L for this date. Changing the check-in date also moves this session\'s litres sold to the new date on the Stock Ledger, shifting opening/closing stock and dip variation for both the old and new dates.':'This shift is handed over and awaiting cash settlement. Changes are recorded in the audit log and will carry through once settled. Changing the check-in date also moves this session\'s litres sold on the Stock Ledger to the new date.'}</span>
       </div>
       <label class="form-label text-xs text-red-600">Reason for Edit * (required)</label>
       <input type="text" id="se-reason" class="form-input text-sm" placeholder="e.g. Staff entered wrong closing reading for N02">
@@ -3236,6 +3259,19 @@ async function saveSessionEdit(sessId,origin='staffreport'){
   const sess=DB.get(`pbms_session_${sessId}`);if(!sess)return;
   const settings=APP.settings||{};
 
+  // Check-in date & time — validate before touching anything else
+  const newCheckInDate=document.getElementById('se-checkin-date')?.value;
+  const newCheckInTimeVal=document.getElementById('se-checkin-time')?.value;
+  if(!newCheckInDate){toast('Check-in date is required','error');return;}
+  if(newCheckInDate>fmt.today()){toast('Check-in date cannot be in the future','error');return;}
+  if(sess.checkOutDate&&newCheckInDate>sess.checkOutDate){toast('Check-in date cannot be after the check-out date','error');return;}
+  if(sess.settledDate&&newCheckInDate>sess.settledDate){toast('Check-in date cannot be after the settlement date','error');return;}
+  const newCheckInTime=newCheckInTimeVal?new Date(`2000-01-01T${newCheckInTimeVal}`).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):sess.checkInTime;
+  const oldCheckInDate=sess.checkInDate,oldCheckInTime=sess.checkInTime;
+  const checkInChanged=newCheckInDate!==oldCheckInDate||newCheckInTime!==oldCheckInTime;
+  sess.checkInDate=newCheckInDate;
+  sess.checkInTime=newCheckInTime;
+
   // Update nozzle readings — integer paise arithmetic
   sess.assignedNozzles=(sess.assignedNozzles||[]).map(n=>{
     const closing=parseFloat(document.getElementById(`se-closing-${n.nozzleId}`)?.value)||n.closingReading||0;
@@ -3276,11 +3312,13 @@ async function saveSessionEdit(sessId,origin='staffreport'){
   // Snapshot before/after for audit
   const before={calcSales:sess.calcSales,shortageExcess:sess.shortageExcess,
     ...Object.fromEntries((sess.assignedNozzles||[]).map(n=>[`${n.nozzleId}_closing`,n.closingReading])),
-    cashAmt:c.cashAmt,upiAmt:c.upiAmt,cardAmt:c.cardAmt,creditAmt:c.creditAmt};
+    cashAmt:c.cashAmt,upiAmt:c.upiAmt,cardAmt:c.cardAmt,creditAmt:c.creditAmt,
+    checkInDate:oldCheckInDate,checkInTime:oldCheckInTime};
 
   const after={calcSales:sess.calcSales,shortageExcess:sess.shortageExcess,
     ...Object.fromEntries(sess.assignedNozzles.map(n=>[`${n.nozzleId}_closing`,n.closingReading])),
-    cashAmt:c.cashAmt,upiAmt:c.upiAmt,cardAmt:c.cardAmt,creditAmt:c.creditAmt};
+    cashAmt:c.cashAmt,upiAmt:c.upiAmt,cardAmt:c.cardAmt,creditAmt:c.creditAmt,
+    checkInDate:sess.checkInDate,checkInTime:sess.checkInTime};
 
   if(!sess.editHistory)sess.editHistory=[];
   sess.editHistory.push({editedAt:new Date().toISOString(),editedBy:APP.userEmail||'Manager',reason,before,after});
@@ -3295,7 +3333,7 @@ async function saveSessionEdit(sessId,origin='staffreport'){
   // Invalidate report cache so monthly report reflects the edit
   await ReportCache.markDirty(['monthly','profit']);
 
-  toast('Session updated — report refreshed','success');
+  toast(checkInChanged?`Session updated (check-in moved to ${fmt.date(sess.checkInDate)} · ${sess.checkInTime}) — report refreshed`:'Session updated — report refreshed','success');
 
   if(origin==='pending'){
     // Came from the Pending Settlements list — just refresh that list in place.
